@@ -1,0 +1,19 @@
+{
+	"name": "codehamr",
+	"dockerFile": "../Dockerfile",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go"
+			]
+		}
+	},
+	"runArgs": [
+		"--privileged",
+		"--add-host=host.docker.internal:host-gateway"
+	],
+	"mounts": [
+		"source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/root/.ssh,type=bind,consistency=cached"
+	],
+	"postCreateCommand": "chmod 700 /root/.ssh && chmod 600 /root/.ssh/* 2>/dev/null; true"
+}

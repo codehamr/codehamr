@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+.env
+**/data/
+**/bin
+**/docs
+**/.codehamr
+**/dist
+**/.claude
+CODEHAMR.md
+CLAUDE.md
+REFACTOR.md
+git-reset.sh
+REFACTOR_STATE.md

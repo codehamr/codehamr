@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - main: ./cmd/codehamr
+    binary: codehamr
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [binary]
+    name_template: "codehamr-{{ if eq .Os \"darwin\" }}macos{{ else }}{{ .Os }}{{ end }}-{{ .Arch }}"
+
+checksum:
+  name_template: "codehamr_checksums.txt"
+  algorithm: sha256
+
+changelog:
+  use: git
+  sort: desc
+  abbrev: -1
+  filters:
+    exclude:
+      - '^Merge '
