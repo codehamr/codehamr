@@ -238,10 +238,10 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.scroll.Reset()
 	m.sessionTokens = 0
 	m.streamingEstimate = 0
-	// /clear is the full-reset button: plan-executor state goes with it so
-	// the next turn starts from a blank slate with no stale phase or task
-	// bookkeeping.
-	m.resetPlanState()
+	// /clear is the full-reset button: GYSD session goes with it so the
+	// next turn starts with no stale VerifyLog, RedStreak, or per-loop
+	// counters.
+	m.gysd.Reset()
 	// Wipe prompt recall too — both the in-memory ring and the on-disk
 	// .codehamr/history. /clear is the project-scoped nuclear option, and
 	// leaving prompt history behind would contradict the "fresh start"

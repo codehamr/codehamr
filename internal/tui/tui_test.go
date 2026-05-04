@@ -16,6 +16,7 @@ import (
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
+	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
 	"github.com/codehamr/codehamr/internal/mcp"
 )
@@ -601,7 +602,9 @@ func TestSubmitStreamsUpToDone(t *testing.T) {
 }
 
 func TestToolCallRoundTripExecutesBash(t *testing.T) {
-	// First LLM turn requests a bash tool call; second turn returns final text.
+	// Turn 1: bash tool call. Turn 2: ask — yields cleanly under the GYSD
+	// loop-tool requirement. The ask path is the test's "stop here" lever
+	// without any executable verify infrastructure in test.
 	turn := 0
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -612,8 +615,9 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		default:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"done"}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"echoed HAMMER"}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"ask","arguments":"{\"question\":\"Was the echo what you wanted?\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":1}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		}
 	})
@@ -624,15 +628,15 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 	if turn != 2 {
 		t.Fatalf("expected 2 LLM turns, got %d", turn)
 	}
-	// history should contain: user, assistant(tool_call), tool(result), assistant(done)
+	// history: user, assistant(bash call), tool(bash result), assistant(content + ask call)
 	if len(final.history) != 4 {
 		t.Fatalf("history wrong: %d messages", len(final.history))
 	}
 	if final.history[2].Role != "tool" || !strings.Contains(final.history[2].Content, "HAMMER") {
 		t.Fatalf("tool result missing: %+v", final.history[2])
 	}
-	if !strings.Contains(final.scroll.String(), "done") {
-		t.Fatalf("final response missing from scroll: %q", final.scroll.String())
+	if !strings.Contains(stripANSI(final.scroll.String()), "Was the echo what you wanted?") {
+		t.Fatalf("ask question missing from scroll: %q", final.scroll.String())
 	}
 	// Per-turn summary must sum tokens across both LLM rounds, not overwrite.
 	// Round 1 reports usage.completion_tokens=5, round 2 reports 1. Sum = 6.
@@ -1009,93 +1013,46 @@ func TestSessionTokensSurviveFinalizeTurn(t *testing.T) {
 	}
 }
 
-// TestFinalizeTurnResetsToolCallCounter: finalizeTurn must zero turnToolCalls
-// so the next turn starts with a fresh cap budget, even when no tokens flowed
-// (the early-return path for idle-like turns must still reset).
-func TestFinalizeTurnResetsToolCallCounter(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.turnToolCalls = 15
-	// No tokens / elapsed → triggers finalizeTurn's early-return. Reset must
-	// still fire, otherwise a cancelled turn leaks call-count into the next.
-	m.finalizeTurn()
-	if m.turnToolCalls != 0 {
-		t.Fatalf("finalizeTurn must reset turnToolCalls even on early-return, got %d", m.turnToolCalls)
-	}
-}
-
-// TestTurnCapAllowsUpToMaxToolCalls: below the cap each pending tool call
-// must dispatch normally — the counter increments, phase flips to running,
-// a Cmd is returned, and no warning is written.
-func TestTurnCapAllowsUpToMaxToolCalls(t *testing.T) {
+// TestS4ToolCapYieldsTurn: when gysd's per-turn tool-call counter exceeds
+// MaxToolCallsPerTurn, dispatchNextTool must yield — pending dropped, ctx
+// cancelled, phase=idle, scrollback explains the yield. Prevents qwen-class
+// intra-stream tool-call loops from burning context.
+func TestS4ToolCapYieldsTurn(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	m.turnCtx = ctx
 	m.cancel = cancel
 	m.phase = phaseThinking
-	m.turnToolCalls = maxToolsPerTurn - 1
-	m.pending = []chmctx.ToolCall{{Name: "bash", Arguments: map[string]any{"cmd": "echo x"}}}
-
-	out, cmd := m.Update(streamClosedMsg{})
-	om := out.(Model)
-
-	if om.turnToolCalls != maxToolsPerTurn {
-		t.Fatalf("counter should increment to %d, got %d", maxToolsPerTurn, om.turnToolCalls)
+	// Pre-load gysd to one shy of the cap so the next NoteToolCall trips it.
+	m.gysd.BeginTurn()
+	for i := 0; i < gysd.MaxToolCallsPerTurn; i++ {
+		m.gysd.NoteToolCall()
 	}
-	if om.phase != phaseRunning {
-		t.Fatalf("phase should flip to running, got %v", om.phase)
-	}
-	if cmd == nil {
-		t.Fatal("below cap: expected runToolCall Cmd, got nil")
-	}
-	if strings.Contains(stripANSI(om.scroll.String()), "turn capped") {
-		t.Fatalf("below cap: no cap warning expected, got %q", om.scroll.String())
-	}
-}
-
-// TestTurnCapAbortsAfterMaxToolCalls: once turnToolCalls hits maxToolsPerTurn
-// and pending calls remain, streamClosedMsg must abort the turn — cancel ctx,
-// drop pending, warn the user, reset counter via finalizeTurn, land phaseIdle.
-// Prevents qwen-class intra-stream tool-call loops from burning context.
-func TestTurnCapAbortsAfterMaxToolCalls(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.turnCtx = ctx
-	m.cancel = cancel
-	m.phase = phaseThinking
-	m.turnToolCalls = maxToolsPerTurn
 	m.pending = []chmctx.ToolCall{{Name: "bash", Arguments: map[string]any{"cmd": "echo x"}}}
 
 	out, _ := m.Update(streamClosedMsg{})
 	om := out.(Model)
 
-	// cmd may be a non-nil tea.Batch of tea.Println calls (the cap warning
-	// flushed into scrollback) but must not be a tool dispatch — verified
-	// by the post-conditions below: phase idle, pending dropped, ctx
-	// cancelled.
 	if om.phase.active() {
-		t.Fatalf("phase must be idle after cap abort, got %v", om.phase)
+		t.Fatalf("phase must be idle after S4 yield, got %v", om.phase)
 	}
 	if om.cancel != nil {
-		t.Fatal("cancel must be cleared after cap abort")
+		t.Fatal("cancel must be cleared after S4 yield")
 	}
 	if om.turnCtx != nil {
-		t.Fatal("turnCtx must be cleared after cap abort")
+		t.Fatal("turnCtx must be cleared after S4 yield")
 	}
 	if len(om.pending) != 0 {
 		t.Fatalf("pending must be dropped: %+v", om.pending)
 	}
-	if om.turnToolCalls != 0 {
-		t.Fatalf("cap abort should reset counter via finalizeTurn, got %d", om.turnToolCalls)
-	}
-	if !strings.Contains(stripANSI(om.scroll.String()), "turn capped") {
-		t.Fatalf("scrollback missing cap warning: %q", stripANSI(om.scroll.String()))
+	if !strings.Contains(stripANSI(om.scroll.String()), "tool calls in one turn") {
+		t.Fatalf("scrollback missing S4 yield notice: %q", stripANSI(om.scroll.String()))
 	}
 	select {
 	case <-ctx.Done():
 	default:
-		t.Fatal("underlying context was not cancelled by cap abort")
+		t.Fatal("underlying context was not cancelled by S4 yield")
 	}
 }
 
@@ -1371,29 +1328,22 @@ func TestHandleStreamDrainsAfterCancel(t *testing.T) {
 	}
 }
 
-// TestHandleStreamClosedSkipsPlanAdvanceAfterCancel: Ctrl+C during a plan
-// turn leaves phase=idle but planPhase still set; the deferred
-// streamClosedMsg must not auto-restart a new turn (which would surprise
-// the user with the plan re-nudging itself after they asked to stop).
-func TestHandleStreamClosedSkipsPlanAdvanceAfterCancel(t *testing.T) {
+// TestHandleStreamClosedSkipsAdvanceAfterCancel: Ctrl+C during a turn
+// leaves phase=idle; the deferred streamClosedMsg must not auto-restart
+// a new turn (which would surprise the user with the loop re-nudging
+// itself after they asked to stop). gysd S6Streak should also stay put.
+func TestHandleStreamClosedSkipsAdvanceAfterCancel(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.phase = phaseIdle // handleCtrlC already finalised
-	m.planPhase = planPhaseExecuting
-	// set up a plan so planAdvance would have had work to do
-	m.plan = samplePlan(t)
-	m.plan.Tasks[0].Status = 1 // StatusActive
-	m.planActiveNum = "01"
+	m.gysd.S6Streak = 1
 
 	out, cmd := m.handleStreamClosed()
 	om := out.(Model)
 	if cmd != nil {
 		t.Fatal("stale close after cancel must NOT return a new-turn Cmd")
 	}
-	if om.planStallTurns != 0 {
-		t.Fatalf("stall counter should not tick on stale close: got %d", om.planStallTurns)
-	}
-	if om.planPhase != planPhaseExecuting {
-		t.Fatalf("plan phase should stay put, got %v", om.planPhase)
+	if om.gysd.S6Streak != 1 {
+		t.Fatalf("S6Streak should not tick on stale close: got %d", om.gysd.S6Streak)
 	}
 }
 

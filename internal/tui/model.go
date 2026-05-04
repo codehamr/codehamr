@@ -16,9 +16,9 @@ import (
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
+	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
 	"github.com/codehamr/codehamr/internal/mcp"
-	"github.com/codehamr/codehamr/internal/plan"
 	"github.com/codehamr/codehamr/internal/tools"
 	"github.com/codehamr/codehamr/internal/update"
 )
@@ -32,13 +32,6 @@ const (
 	popoverCap    = 6 // max rows the popover may claim
 	pingTimeout   = 2 * time.Second
 )
-
-// maxToolsPerTurn is the hard safety net for runaway turns — nothing more.
-// Pacing, loop recognition, and turn length are prompt responsibilities, not
-// code responsibilities. 250 is set high enough that a well-behaved model
-// never trips it; only a broken prompt or a stuck loop that ignores the
-// prompt's self-watch rules should ever reach this.
-const maxToolsPerTurn = 250
 
 // phase is the turn state machine. Idle = no turn; thinking = waiting on the
 // model but no tokens yet; streaming = content is flowing; running = a tool is
@@ -107,10 +100,10 @@ type Model struct {
 
 	// turn-level stats (reset in finalizeTurn) + session-cumulative token
 	// count (reset only by /clear, so the status bar carries the running
-	// total across the whole hamr session).
+	// total across the whole hamr session). Tool-call accounting lives on
+	// gysd.Session — this struct only carries display stats.
 	turnTokens    int
 	turnElapsed   time.Duration
-	turnToolCalls int
 	sessionTokens int
 	// streamingEstimate is a live char/4 estimate of tokens generated
 	// within the current round (reasoning + content). Needed because the
@@ -158,20 +151,12 @@ type Model struct {
 	status string // transient status-bar warning (cleared next render cycle)
 	phase  phase  // idle / thinking / streaming / running
 
-	// Plan-mode state. plan is the in-memory typed plan produced by the
-	// agent's submit_plan call; tasks carry their own Status and Results.
-	// planPhase drives the executor state machine (none → planning →
-	// executing → wrap-up → none). planActiveNum tracks which task the
-	// executor believes is active so transitions are detectable. The
-	// stall counter is the safety valve against runaway loops; planMisses
-	// counts get_task_output calls (agent escape hatch) so we can see when
-	// the planner is under-specifying inputs.
-	plan              *plan.Plan
-	planPhase         planPhase
-	planActiveNum     string
-	planStallTurns    int
-	planWrapUpStarted bool
-	planMisses        int
+	// gysd holds the loop state machine: VerifyLog (evidence pool for
+	// `done`), per-turn tool-call counter, S6/S7 streak counters, and
+	// the deterministic Schranken from data/gysd.md. One instance per
+	// Model; the package never spawns goroutines so all mutations stay
+	// on the UI thread.
+	gysd *gysd.Session
 
 	// updateAvailable is flipped by the passive startup probe in
 	// internal/update. It drives a single dim line in renderSplash; once the
@@ -221,6 +206,7 @@ func New(cfg *config.Config, mgr *mcp.Manager, cli *llm.Client, projectDir, vers
 		scroll:          new(strings.Builder),
 		histIdx:         -1,
 		liveContextSize: map[string]int{},
+		gysd:            &gysd.Session{},
 	}
 	// Seed prompt history from .codehamr/history so ↑ recalls prompts the
 	// user typed in earlier sessions of this project. Loaded entries carry
@@ -391,6 +377,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = phaseThinking
 		return m, m.startChat()
 
+	case verifyResultMsg:
+		// applyVerifyResult guards against stale msgs by checking
+		// phase.active() before mutating gysd state — same drop-on-
+		// inactive contract as toolResultMsg.
+		return m.applyVerifyResult(msg)
+
 	case quitArmResetMsg:
 		if !m.quitArmedAt.IsZero() && time.Now().After(m.quitArmedAt) {
 			m.quitArmedAt = time.Time{}
@@ -430,18 +422,11 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		dbgWritef("user_slash", "%s", sendText)
 		return m.runSlash(sendText)
 	}
-	// Force plan-mode entry when the user's message opens with a plan
-	// keyword ("plan …", "plane …", "planen …", case-insensitive) AND no
-	// plan is currently in flight. Prepending the planning directive
-	// bypasses the LLM's judgment on whether to plan — local models often
-	// read the prompt rule as a heuristic and skip planning on requests
-	// that clearly need it. Gated on planPhaseNone so a mid-plan message
-	// doesn't restart the machine.
-	if startsWithPlanKeyword(sendText) && m.planPhase == planPhaseNone {
-		m.planPhase = planPhasePlanning
-		m.planStallTurns = 0
-		sendText = planningDirective + "\n\n" + sendText
-	}
+	// Every user message starts a fresh GYSD sub-loop: the previous
+	// VerifyLog, RedStreak, and S6 streak don't carry into the next
+	// goal. The model's history persists separately — only the
+	// orchestrator's evidence pool is wiped.
+	m.gysd.AfterUserMessage()
 	dbgWritef("user", "%s", sendText)
 	return m, m.appendUserTurn(sendText)
 }
@@ -470,12 +455,13 @@ func (m *Model) installTurnContext() context.Context {
 }
 
 // beginTurn installs a fresh per-turn context, flips phase to thinking,
-// and returns the chat stream-reader Cmd. Every path that starts a new
-// LLM round (user submit, plan executor fresh-start, plan nudges)
-// funnels through here so Ctrl+C cancels the whole cascade in one
-// m.cancel() call.
+// resets the gysd per-turn counters (S4 cap, S5 wall-clock, loop-tool
+// flag), and returns the chat stream-reader Cmd. Every path that starts
+// a new LLM round (user submit, gysd S6 nudge) funnels through here so
+// Ctrl+C cancels the whole cascade in one m.cancel() call.
 func (m *Model) beginTurn() tea.Cmd {
 	m.installTurnContext()
+	m.gysd.BeginTurn()
 	m.phase = phaseThinking
 	return m.startChat()
 }
@@ -485,14 +471,6 @@ func (m *Model) beginTurn() tea.Cmd {
 // rather than reset it.
 func (m *Model) appendUserTurn(content string) tea.Cmd {
 	m.history = append(m.history, chmctx.Message{Role: chmctx.RoleUser, Content: content})
-	return m.beginTurn()
-}
-
-// freshUserTurn replaces history with a single user-role message and starts
-// a turn. Used at plan task transitions and wrap-up where the only state
-// the agent should carry across is the message just rendered.
-func (m *Model) freshUserTurn(content string) tea.Cmd {
-	m.history = []chmctx.Message{{Role: chmctx.RoleUser, Content: content}}
 	return m.beginTurn()
 }
 
@@ -526,18 +504,11 @@ func (m *Model) buildTools() []llm.Tool {
 	out = append(out, schemaToTool(tools.BashSchema()))
 	out = append(out, schemaToTool(tools.WriteFileSchema()))
 	out = append(out, m.mcp.Tools()...)
-	// Plan tools are phase-gated: submit_plan is the ONLY way into an
-	// accepted plan (planning phase); set/complete/get_task_output are the
-	// orchestrator's levers during execution. Wrap-up is a plain chat turn
-	// so we expose no plan tools there.
-	var planSchemas []map[string]any
-	switch m.planPhase {
-	case planPhasePlanning:
-		planSchemas = plan.PlanningTools()
-	case planPhaseExecuting:
-		planSchemas = plan.ExecutionTools()
-	}
-	for _, s := range planSchemas {
+	// GYSD loop tools (verify/done/ask) are always exposed alongside
+	// bash/write_file — one mode, no phase gating, no triage. The
+	// orchestrator enforces "every turn ends with one of these three"
+	// via the gysd Session, not via tool-availability tricks.
+	for _, s := range gysd.LoopTools() {
 		out = append(out, schemaToTool(s))
 	}
 	return out
@@ -565,6 +536,14 @@ func schemaToTool(s map[string]any) llm.Tool {
 func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
 	if !m.phase.active() {
 		return m, readEvent(m.stream)
+	}
+	// GYSD S5: wall-clock cap per turn. Cancel the turn cascade if the
+	// per-turn budget is exhausted; abortTurn handles flushing + banner.
+	if m.gysd.TurnExpired() {
+		m.abortTurn(styleWarn.Render(fmt.Sprintf(
+			"⚠ GYSD: turn exceeded %s — cancelled. Restart or split the task smaller.",
+			gysd.MaxTurnDuration)))
+		return m, nil
 	}
 	switch e.Kind {
 	case llm.EventContent:
@@ -665,7 +644,6 @@ func (m *Model) abortTurn(banner string) {
 }
 
 func (m *Model) finalizeTurn() {
-	m.turnToolCalls = 0
 	if m.turnTokens == 0 && m.turnElapsed == 0 {
 		return
 	}
@@ -679,73 +657,51 @@ func (m *Model) finalizeTurn() {
 }
 
 // handleStreamClosed drives what happens after the LLM stream finishes for
-// one round. If tool calls are pending, dispatch the next one (with cap
-// guard + plan-tool interception). Otherwise finalize the turn and let the
-// plan executor advance, or yield control to the user.
+// one round. If tool calls are pending, dispatch the next one. Otherwise
+// finalize the turn, run the GYSD loop-conformity check (S6/S7), and
+// either nudge for verify/done/ask, yield to the user, or end normally.
 func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 	m.stream = nil
 	// Stale close from a turn the user already cancelled (handleCtrlC /
-	// EventError paths reset phase to idle). Don't let planAdvance start
-	// a new turn off the back of a Ctrl+C — that would surprise the user
-	// with the plan re-nudging itself after they asked it to stop.
+	// EventError paths reset phase to idle).
 	if !m.phase.active() {
 		return m, nil
 	}
 	if len(m.pending) > 0 {
-		if m.turnToolCalls >= maxToolsPerTurn {
-			return m.abortCappedTurn(), nil
-		}
 		return m.dispatchNextTool()
 	}
 	m.finalizeTurn()
-	// Plan-mode executor runs after finalizeTurn so the turn stats banner
-	// lands before any task-transition / wrap-up output, and before
-	// phaseIdle so a returned Cmd can flip straight to phaseThinking.
-	if cmd := m.planAdvance(); cmd != nil {
-		return m, cmd
+	// GYSD S6/S7: a turn that didn't end with verify/done/ask gets a
+	// nudge appended as a user-turn (re-enters chat with one more
+	// chance), or yields hard once the streak hits MaxS6Streak.
+	r := m.gysd.EnsureLoopTool()
+	switch {
+	case r.Yield:
+		m.appendLine(styleWarn.Render(r.UserBlock))
+		m.endTurn()
+		return m, nil
+	case r.ToolPayload != "":
+		return m, m.appendUserTurn(r.ToolPayload)
 	}
 	m.endTurn()
 	return m, nil
 }
 
-// abortCappedTurn handles the runaway-turn safety net: cancel any in-flight
-// work, drop the pending queue, emit the cap banner, and bump the plan
-// stall counter so the executor eventually yields instead of re-fresh-
-// starting the same stuck task forever. abortTurn flushes the streaming
-// buffer first so any content that arrived after the last tool call (and
-// would otherwise splash into the next turn's first render) is committed
-// cleanly before the cap warning lands.
-func (m Model) abortCappedTurn() Model {
-	if m.plan != nil {
-		m.planStallTurns++
-	}
-	m.abortTurn(styleWarn.Render(fmt.Sprintf(
-		"✗ turn capped: %d tool calls without completion — Ctrl+C or split the task smaller.",
-		maxToolsPerTurn)))
-	return m
-}
-
-// dispatchNextTool pops the next pending tool call and routes it. Plan
-// tools short-circuit locally: the orchestrator mutates in-memory plan
-// state synchronously and synthesizes a tool-result message that flows
-// through the normal toolResultMsg path, so the agent sees the response
-// exactly like any other tool call.
+// dispatchNextTool pops the next pending tool call and routes it. GYSD
+// loop tools (verify/done/ask) short-circuit through gysd.Session;
+// everything else (bash, write_file, MCP) flows through the regular
+// runToolCall path. S4 (per-turn tool-call cap) is enforced here before
+// any dispatch — overrun aborts the whole pending queue and yields.
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
-	m.turnToolCalls++
+	if r := m.gysd.NoteToolCall(); r.Yield {
+		m.abortTurn(styleWarn.Render(r.UserBlock))
+		return m, nil
+	}
 	call := m.pending[0]
 	m.pending = m.pending[1:]
 	m.appendLine(styleDim.Render(tools.InlineStatus(call)))
-	if plan.IsPlanTool(call.Name) {
-		result := m.handlePlanTool(call)
-		m.phase = phaseThinking
-		return m, func() tea.Msg {
-			return toolResultMsg{Msg: chmctx.Message{
-				Role:       chmctx.RoleTool,
-				Content:    result,
-				ToolCallID: call.ID,
-				ToolName:   call.Name,
-			}}
-		}
+	if gysd.IsLoopTool(call.Name) {
+		return m.handleGYSDTool(call)
 	}
 	m.phase = phaseRunning
 	return m, runToolCall(m.turnCtx, call, m.mcp)
