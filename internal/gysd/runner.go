@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -20,26 +19,19 @@ type RunOutcome struct {
 	TimedOut bool
 }
 
-// RunCommand runs cmd via /bin/sh -c with the given timeout, in its own
-// process group so that on cancel/timeout the whole tree dies. Combines
-// stdout+stderr into Output. The TUI calls this from a tea.Cmd goroutine
-// and pipes the result back via verifyResultMsg — the gysd state machine
-// stays single-goroutine.
+// RunCommand runs cmd via /bin/sh -c with the given timeout. On Unix the
+// shell is placed in its own process group via setProcessGroup so cancel
+// or timeout kills the whole tree (see runner_unix.go); on Windows the
+// default exec.Cmd cancellation applies (see runner_windows.go) — Windows
+// is a cross-compile target only, the verify path is not exercised there.
+// The TUI calls this from a tea.Cmd goroutine and pipes the result back
+// via verifyResultMsg — the gysd state machine stays single-goroutine.
 func RunCommand(parent context.Context, command string, timeout time.Duration) RunOutcome {
 	ctxT, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctxT, "/bin/sh", "-c", command)
-	// Setpgid puts the shell in its own process group. cmd.Cancel below
-	// then kills the whole group, so backgrounded children (`cmd &`) die
-	// alongside the parent shell instead of leaking past timeout/cancel.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	setProcessGroup(cmd)
 	// Bound the wait for stdout/stderr pipes to close once the shell exits;
 	// without this, leaked-fd children would keep CombinedOutput blocking
 	// for the full timeout even after the kill.
