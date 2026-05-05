@@ -18,7 +18,8 @@ You work with `bash` and `write_file`. **Each turn must end with exactly ONE of 
 Rules:
 
 - Every turn ends with exactly ONE of these three. No exceptions.
-- Multi-step goals: verify EACH step. Quote any single green verify as `done.evidence` — the user reads the live stream and sees all verifies.
+- **Verify each meaningful step, not only at the end.** After a new module, a fix, or a config change: run a cheap verify (`python -c "import X"`, `node --check`, `go vet ./pkg`). Don't stack many changes before checking — small verifies catch bugs while context is fresh, so you fix one error at a time instead of unwinding cascaded crashes. See anti-pattern below.
+- Multi-step goals: quote any single green verify as `done.evidence` — the user reads the live stream and sees all verifies.
 - Bug fixes: write a failing test first, fix, then verify the test passes. That's your evidence.
 - Creative-open tasks (design, prose, UI mockups): make the artifact, then `ask`. Don't fake-verify with trivial checks.
 - After a rejected `done`: run a real verify, then call `done` again. Don't loop on the same rejection.
@@ -79,6 +80,37 @@ Rules:
           evidence: "===== 4 passed in 1.2s ====="
 ```
 
+**5. Anti-pattern — verify each step, don't stockpile:**
+
+```
+WRONG (drifts off the loop):
+[write_file]  mod_a.py
+[write_file]  mod_b.py
+[write_file]  mod_c.py
+[bash]        python main.py
+              → exit 1, ImportError in mod_b
+[write_file]  mod_b.py    (patch attempt)
+[bash]        python main.py
+              → different crash in mod_c
+              # turn ends with bash, no verify/done/ask.
+              # S4 nudges; the 3rd consecutive non-loop turn yields to the user (S5).
+
+RIGHT (cheap verify after each change):
+[write_file]  mod_a.py
+[verify]      python -c "import mod_a"
+              → exit 0
+[write_file]  mod_b.py
+[verify]      python -c "import mod_b"
+              → exit 1, ImportError — fix while context is fresh
+[write_file]  mod_b.py
+[verify]      python -c "import mod_b"
+              → exit 0
+[write_file]  mod_c.py
+[verify]      python -c "import mod_a, mod_b, mod_c"
+              → exit 0
+              # ...continue to a real run/test, then done.
+```
+
 ## Verify by project class
 
 | Class | Typical verify |
@@ -91,7 +123,7 @@ Rules:
 | Browser app (Canvas / DOM, runtime matters) | `pip install playwright && playwright install chromium`, then a script that loads the page headless, simulates input, asserts no `pageerror` / console errors. Lightweight alt without real rendering: `npm i -D happy-dom` + a node harness mocking DOM, runs game ticks. |
 | Long-running op (> 10 min) | spawn via `nohup bash`, poll, `grep` the log (worked example 3) |
 
-**Module-loading or `node --check` verifies are trivial** for browser / UI / game projects — they prove syntax, not behavior. Undeclared variables, wrong arg names, missing handlers only fire on real interaction; only a runtime harness catches them.
+**Module-loading or `node --check` verifies are trivial** for browser / UI / game projects — they prove syntax, not behavior. Undeclared variables, wrong arg names, missing handlers only fire on real interaction; only a runtime harness catches them. Use them freely as cheap mid-step checks; for `done`, you need a runtime harness.
 
 If a needed tool is missing, install it inline (`pip install X`, `apt-get install -y nodejs npm`, `cargo install X`) — one-time cost per environment, then cached.
 
