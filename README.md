@@ -14,6 +14,11 @@ stays yours.
 Three slash commands, one embedded system prompt, no router, no sub
 agents, no skill system. That's it.
 
+The agent runs in one deterministic loop — internally called *GYSD*
+(Get Your Shit Done) — where every turn ends with one of three tools:
+`verify` (run a check), `done` (claim completion, must quote a passing
+verify as proof), or `ask` (yield back to you). No hallucinated success.
+
 ## Install
 
 Linux, macOS:

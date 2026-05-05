@@ -1,7 +1,8 @@
-// Package gysd is codehamr's single-mode loop controller. The agent works
-// with bash and write_file as today; every turn must end with exactly one
-// of three loop tools — verify, done, or ask — and this package owns the
-// state machine that enforces it.
+// Package gysd is codehamr's single-mode loop controller. "GYSD" is short
+// for Get Your Shit Done: one loop, three loop tools (verify, done, ask),
+// one rule — show evidence, don't claim. The agent works with bash and
+// write_file as today; every turn must end with exactly one of the three
+// loop tools, and this package owns the state machine that enforces it.
 //
 // The package never executes subprocesses itself. The TUI runs the bash
 // command for a verify call (so the goroutine model stays clean) and hands
@@ -119,7 +120,7 @@ func (s *Session) NoteToolCall(name string, args map[string]any) Result {
 		return Result{
 			Yield: true,
 			UserBlock: fmt.Sprintf(
-				"⚠ GYSD: same %s call repeated %d×. Try a different approach or /clear.",
+				"⚠ Stuck — same `%s` call repeated %d×. Tell me what to try differently, or /clear.",
 				name, RepeatTriggerCount),
 		}
 	}
@@ -169,7 +170,7 @@ func (s *Session) PreVerify(command string, timeoutSec int) (run bool, timeout t
 		return false, 0, Result{
 			Yield: true,
 			UserBlock: fmt.Sprintf(
-				"⚠ GYSD: %d verifies without `done` — yielding. What should I do?",
+				"⚠ Stuck — %d verify checks without finishing. Tell me what's missing, or /clear.",
 				len(s.VerifyLog)),
 		}
 	}
@@ -221,7 +222,7 @@ func (s *Session) RecordVerify(command, output string, exitCode int, canceled bo
 // would see only "3 reds in a row" with no actionable detail.
 func (s *Session) buildRedStreakBlock() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "⚠ GYSD: %d consecutive red verifies — yielding.\n", MaxRedStreak)
+	fmt.Fprintf(&b, "⚠ Stuck — %d verify checks failed in a row.\n", MaxRedStreak)
 	n := 0
 	for i := len(s.VerifyLog) - 1; i >= 0 && n < MaxRedStreak; i-- {
 		e := s.VerifyLog[i]
@@ -230,7 +231,7 @@ func (s *Session) buildRedStreakBlock() string {
 			n++
 		}
 	}
-	b.WriteString("\nUser: how should I proceed?")
+	b.WriteString("\nWhat should I try differently?")
 	return b.String()
 }
 
@@ -288,7 +289,7 @@ func (s *Session) EnsureLoopTool() Result {
 		return Result{
 			Yield: true,
 			UserBlock: fmt.Sprintf(
-				"⚠ GYSD: model didn't end with verify/done/ask for %d turns — yielding.",
+				"⚠ Stuck — I drifted off the verify/done/ask loop for %d turns. Tell me how to proceed, or /clear.",
 				streak),
 		}
 	}

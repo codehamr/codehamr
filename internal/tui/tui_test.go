@@ -1032,8 +1032,9 @@ func TestS2RepeatYieldsTurn(t *testing.T) {
 	if len(om.pending) != 0 {
 		t.Fatalf("pending must be dropped: %+v", om.pending)
 	}
-	if !strings.Contains(stripANSI(om.scroll.String()), "bash call repeated 3×") {
-		t.Fatalf("scrollback missing S2 yield notice: %q", stripANSI(om.scroll.String()))
+	scroll := stripANSI(om.scroll.String())
+	if !strings.Contains(scroll, "bash") || !strings.Contains(scroll, "repeated 3×") {
+		t.Fatalf("scrollback missing S2 yield notice: %q", scroll)
 	}
 	select {
 	case <-ctx.Done():

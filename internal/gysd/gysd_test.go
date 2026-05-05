@@ -260,7 +260,7 @@ func TestS1VerifyCap(t *testing.T) {
 	if !r.Yield {
 		t.Fatalf("S1 should yield: %+v", r)
 	}
-	if !strings.Contains(r.UserBlock, "without `done`") {
+	if !strings.Contains(r.UserBlock, "without finishing") {
 		t.Fatalf("S1 block text: %q", r.UserBlock)
 	}
 }
@@ -279,7 +279,7 @@ func TestS2RepeatDetectVerify(t *testing.T) {
 	if !r.Yield {
 		t.Fatalf("3rd identical verify should yield: %+v", r)
 	}
-	if !strings.Contains(r.UserBlock, "verify call repeated 3×") {
+	if !strings.Contains(r.UserBlock, "verify") || !strings.Contains(r.UserBlock, "repeated 3×") {
 		t.Fatalf("S2 block text: %q", r.UserBlock)
 	}
 }
@@ -298,7 +298,7 @@ func TestS2RepeatDetectBash(t *testing.T) {
 	if !r.Yield {
 		t.Fatalf("3rd identical bash should yield: %+v", r)
 	}
-	if !strings.Contains(r.UserBlock, "bash call repeated 3×") {
+	if !strings.Contains(r.UserBlock, "bash") || !strings.Contains(r.UserBlock, "repeated 3×") {
 		t.Fatalf("S2 bash block text: %q", r.UserBlock)
 	}
 }
@@ -399,7 +399,7 @@ func TestS3RedStreak(t *testing.T) {
 	if !r.Yield {
 		t.Fatalf("3rd consecutive red should yield: %+v", r)
 	}
-	if !strings.Contains(r.UserBlock, "consecutive red") {
+	if !strings.Contains(r.UserBlock, "failed in a row") {
 		t.Fatalf("S3 block text: %q", r.UserBlock)
 	}
 	// After yield, streak should reset for fresh sub-loop.
