@@ -422,7 +422,7 @@ func TestPopoverEnterSubmitsNoArgCommand(t *testing.T) {
 // preselected.
 func TestArgPopoverOpensForModels(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	// Bootstrap always seeds local + hamrpass; drop the latter so this
+	// First-run Bootstrap seeds local + hamrpass; drop the latter so this
 	// test is asserting popover content, not config defaults.
 	delete(m.cfg.Models, "hamrpass")
 	m.cfg.Models["remote"] = &config.Profile{
@@ -1650,6 +1650,37 @@ func TestHamrpassSetsKeyAndActivates(t *testing.T) {
 	out := stripANSI(final.scroll.String())
 	if !strings.Contains(out, "▶ probing hamrpass") {
 		t.Fatalf("expected probing placeholder in scrollback:\n%s", out)
+	}
+}
+
+// TestHamrpassLazyCreatesProfile: a user who has hidden hamrpass from
+// config.yaml can still activate it by pasting a key. /hamrpass <key>
+// creates the profile from canonical seed values, stores the key, and
+// flips active — no "restart codehamr" detour.
+func TestHamrpassLazyCreatesProfile(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	delete(m.cfg.Models, "hamrpass")
+	if _, ok := m.cfg.Models["hamrpass"]; ok {
+		t.Fatal("precondition: hamrpass should be absent")
+	}
+	const key = "hp-test-key-1234567890abcdef"
+	m2, cmd := m.runSlash("/hamrpass " + key)
+	final := m2.(Model)
+	hp, ok := final.cfg.Models["hamrpass"]
+	if !ok {
+		t.Fatal("hamrpass profile should be lazy-created by /hamrpass")
+	}
+	if hp.URL != "https://codehamr.com" || hp.LLM != "hamrpass" {
+		t.Fatalf("lazy-created hamrpass has wrong canonical fields: %+v", hp)
+	}
+	if hp.Key != key {
+		t.Fatalf("key not stored on lazy-created profile: %q", hp.Key)
+	}
+	if final.cfg.Active != "hamrpass" {
+		t.Fatalf("active should switch to hamrpass, got %q", final.cfg.Active)
+	}
+	if cmd == nil {
+		t.Fatal("set should return a probeBackend command on lazy-create path too")
 	}
 }
 

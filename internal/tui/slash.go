@@ -277,20 +277,14 @@ func (m *Model) printHamrpassStatus() {
 	m.appendLine(styleDim.Render("Once set, the remaining pass percentage appears in the status bar."))
 }
 
-// activateHamrpass writes the key onto the managed hamrpass profile,
-// switches active, rebuilds the llm client, and triggers the shared
-// activation confirmation (probe path, since hamrpass always has a key
-// after this point). Pulled out of cmdHamrpass so the validation switch
-// up top reads as a clean gate, with side effects below.
+// activateHamrpass writes the key onto the hamrpass profile (creating
+// the entry from canonical seed values if the user has hidden it from
+// config.yaml), switches active, rebuilds the llm client, and triggers
+// the shared activation confirmation (probe path, since hamrpass always
+// has a key after this point). Pulled out of cmdHamrpass so the
+// validation switch up top reads as a clean gate, with side effects below.
 func (m *Model) activateHamrpass(key string) tea.Cmd {
-	hp, ok := m.cfg.Models["hamrpass"]
-	if !ok {
-		// Bootstrap guarantees hamrpass exists; this is a defensive
-		// path for hand-edited configs that nuked the entry between
-		// Bootstrap and now.
-		m.appendLine(styleError.Render("⚠ hamrpass profile missing — restart codehamr to restore it"))
-		return nil
-	}
+	hp := m.cfg.EnsureHamrpass()
 	hp.Key = key
 	if err := m.cfg.SetActive("hamrpass"); err != nil {
 		m.appendLine(styleError.Render("⚠ " + err.Error()))

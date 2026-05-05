@@ -45,13 +45,12 @@ func IsCloudProfile(name string) bool {
 	return ok
 }
 
-// managedProfiles are the two profiles codehamr always guarantees in
-// config.yaml: a local Ollama target and the hosted hamrpass endpoint
-// (with empty key — the user pastes their hamrpass key via /hamrpass).
-// If the user manually deletes either entry, Bootstrap re-adds it on the
-// next start with these canonical values and rewrites config.yaml so the
-// file looks freshly seeded. Existing entries are never touched, so user
-// keys / overrides survive across runs. hamrpass intentionally has
+// managedProfiles are the two profiles codehamr seeds on first run: a
+// local Ollama target and the hosted hamrpass endpoint (with empty key —
+// the user pastes their hamrpass key via /hamrpass, which lazily
+// re-creates the entry from this seed if the user has deleted it). After
+// first run config.yaml belongs to the user — deletions and renames
+// stick, Bootstrap never re-adds anything. hamrpass intentionally has
 // ContextSize=0 — combined with omitempty on the yaml tag, that keeps
 // the field out of config.yaml so users don't try to tune what the
 // server already manages.
@@ -152,23 +151,6 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 			return nil, false, fmt.Errorf("config.yaml: profile %q is empty — remove it or fill in the required fields", name)
 		}
 	}
-	// Re-add any managed profile (local, hamrpass) the user has deleted
-	// from config.yaml. Empty key on hamrpass is intentional — the user
-	// pastes their own via /hamrpass. If anything was restored, persist
-	// so the file on disk reflects the real set of profiles next time
-	// the user looks at it.
-	if cfg.Models == nil {
-		cfg.Models = map[string]*Profile{}
-	}
-	restored := false
-	for name, p := range managedProfiles {
-		if _, ok := cfg.Models[name]; ok {
-			continue
-		}
-		cp := p
-		cfg.Models[name] = &cp
-		restored = true
-	}
 	// Coerce any missing / zero / negative context_size to the default.
 	// The packer subtracts fixed reservations and floors at 0, so a bogus
 	// value would degenerate packing to "keep only the newest message" —
@@ -186,17 +168,34 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 		}
 	}
 	// Coerce Active if it points to a non-existent profile, picking the
-	// first profile in sorted order (deterministic across runs).
+	// first profile in sorted order (deterministic across runs). If the
+	// user authored a config with no profiles at all, fail loud — runtime
+	// would otherwise nil-deref on the first dial-out.
 	if _, ok := cfg.Models[cfg.Active]; !ok {
-		cfg.Active = cfg.ModelNames()[0]
-	}
-	if restored {
-		if err := writeYAML(cfgPath, cfg); err != nil {
-			return nil, false, err
+		names := cfg.ModelNames()
+		if len(names) == 0 {
+			return nil, false, errors.New("config.yaml: no profiles configured — add one under `models:` or delete .codehamr/config.yaml to reseed defaults")
 		}
+		cfg.Active = names[0]
 	}
 
 	return cfg, created, nil
+}
+
+// EnsureHamrpass returns the hamrpass profile, creating it from the
+// canonical seed values if the user has deleted it from config.yaml.
+// Used by /hamrpass so a user who has hidden the profile can still
+// activate it by pasting a key — no "restart codehamr" detour.
+func (c *Config) EnsureHamrpass() *Profile {
+	if hp, ok := c.Models["hamrpass"]; ok {
+		return hp
+	}
+	tmpl := managedProfiles["hamrpass"]
+	if c.Models == nil {
+		c.Models = map[string]*Profile{}
+	}
+	c.Models["hamrpass"] = &tmpl
+	return c.Models["hamrpass"]
 }
 
 // Save rewrites config.yaml.

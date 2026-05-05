@@ -85,11 +85,12 @@ func TestBootstrapHamrpassHasNoContextSizeOnDisk(t *testing.T) {
 	}
 }
 
-// TestBootstrapRestoresDeletedHamrpass: if the user removes the hamrpass
-// entry from config.yaml, the next Bootstrap re-adds it with the
-// canonical URL and an empty key, persists the change to disk, and
-// leaves all other profiles untouched.
-func TestBootstrapRestoresDeletedHamrpass(t *testing.T) {
+// TestBootstrapDoesNotRestoreDeletedHamrpass: once config.yaml exists,
+// the user owns its profile list. A removed hamrpass entry stays gone
+// across restarts (re-creation only happens via /hamrpass), and the
+// on-disk file is not silently rewritten. User customisations on other
+// profiles round-trip untouched.
+func TestBootstrapDoesNotRestoreDeletedHamrpass(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
 	if err := os.MkdirAll(cdir, 0o755); err != nil {
@@ -112,37 +113,105 @@ models:
 	if err := os.WriteFile(cfgPath, yaml, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	beforeStat, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg, _, err := Bootstrap(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hp, ok := cfg.Models["hamrpass"]
-	if !ok {
-		t.Fatal("deleted hamrpass should be restored")
+	if _, ok := cfg.Models["hamrpass"]; ok {
+		t.Fatal("hamrpass was deleted from config.yaml; Bootstrap must not restore it")
 	}
-	if hp.URL != "https://codehamr.com" || hp.Key != "" {
-		t.Fatalf("restored hamrpass has wrong fields: %+v", hp)
+	if len(cfg.Models) != 2 {
+		t.Fatalf("expected exactly the two user profiles, got %d: %+v", len(cfg.Models), cfg.Models)
 	}
-	// User customisations to other profiles must survive intact.
+	// User customisations must survive intact.
 	if cfg.Models["local"].URL != "http://host.docker.internal:11434" || cfg.Models["local"].ContextSize != 262144 {
 		t.Fatalf("local profile was mutated: %+v", cfg.Models["local"])
 	}
 	if cfg.Models["custom"].Key != "sk-keep" {
 		t.Fatalf("custom profile was mutated: %+v", cfg.Models["custom"])
 	}
-	// And the change must hit disk so reloading without re-running the
-	// restore path still sees hamrpass present.
-	reloaded, _, err := Bootstrap(dir)
+	// No spurious rewrite of config.yaml — Bootstrap's only job here is
+	// to read, not to "tidy". mtime is the cheapest signal.
+	afterStat, err := os.Stat(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reloaded.Models["hamrpass"]; !ok {
-		t.Fatal("restored hamrpass was not persisted to config.yaml")
+	if !afterStat.ModTime().Equal(beforeStat.ModTime()) {
+		t.Fatal("config.yaml was rewritten by Bootstrap on a clean read path")
+	}
+}
+
+// TestBootstrapDoesNotRestoreRenamedLocal: a user who renames `local` to
+// e.g. `ollama` must not see a fresh `local` reappear as a duplicate on
+// the next start. Same invariant as the deleted-hamrpass case, exercised
+// for the other managed profile.
+func TestBootstrapDoesNotRestoreRenamedLocal(t *testing.T) {
+	dir := t.TempDir()
+	cdir := filepath.Join(dir, DirName)
+	if err := os.MkdirAll(cdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := []byte(`active: ollama
+models:
+  ollama:
+    llm: qwen3.6:27b
+    url: http://localhost:11434
+    key: ""
+    context_size: 65536
+`)
+	if err := os.WriteFile(filepath.Join(cdir, "config.yaml"), yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Bootstrap(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Models["local"]; ok {
+		t.Fatal("renamed-away `local` must not be restored")
+	}
+	if _, ok := cfg.Models["hamrpass"]; ok {
+		t.Fatal("hamrpass not declared in config.yaml; must not appear")
+	}
+	if len(cfg.Models) != 1 || cfg.Active != "ollama" {
+		t.Fatalf("expected single 'ollama' profile active, got Active=%q models=%+v", cfg.Active, cfg.Models)
+	}
+}
+
+// TestEnsureHamrpassLazyCreates: when the user has hidden hamrpass from
+// config.yaml, EnsureHamrpass returns a profile populated from the
+// canonical seed values. Idempotent — calling twice returns the same
+// pointer.
+func TestEnsureHamrpassLazyCreates(t *testing.T) {
+	cfg := &Config{
+		Active: "local",
+		Models: map[string]*Profile{
+			"local": {LLM: "m", URL: "http://x", Key: "", ContextSize: 65536},
+		},
+	}
+	hp := cfg.EnsureHamrpass()
+	if hp == nil {
+		t.Fatal("EnsureHamrpass returned nil")
+	}
+	if hp.URL != "https://codehamr.com" || hp.LLM != "hamrpass" || hp.Key != "" {
+		t.Fatalf("lazy-created hamrpass has wrong fields: %+v", hp)
+	}
+	if got := cfg.Models["hamrpass"]; got != hp {
+		t.Fatal("EnsureHamrpass did not store the entry on cfg.Models")
+	}
+	hp2 := cfg.EnsureHamrpass()
+	if hp2 != hp {
+		t.Fatal("EnsureHamrpass should be idempotent — second call must return the same pointer")
 	}
 }
 
 // TestBootstrapPreservesExistingHamrpassKey: a user-supplied key on the
-// hamrpass entry must never be overwritten by the restore path.
+// hamrpass entry must round-trip untouched. Trivially true now that
+// Bootstrap doesn't mutate existing entries at all, but kept as a
+// regression guard against any future "tidy on read" temptation.
 func TestBootstrapPreservesExistingHamrpassKey(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -205,9 +274,12 @@ models:
 	if cfg.Active != "work" {
 		t.Fatalf("Active = %q, want work", cfg.Active)
 	}
-	// User profiles plus the two managed profiles Bootstrap always
-	// guarantees (local, hamrpass).
-	for _, name := range []string{"home", "work", "local", "hamrpass"} {
+	// User-authored config defines exactly these two profiles. Bootstrap
+	// must not silently inject local/hamrpass on top.
+	if len(cfg.Models) != 2 {
+		t.Fatalf("expected exactly the two declared profiles, got %d: %+v", len(cfg.Models), cfg.Models)
+	}
+	for _, name := range []string{"home", "work"} {
 		if _, ok := cfg.Models[name]; !ok {
 			t.Fatalf("expected profile %q in loaded config", name)
 		}
@@ -298,10 +370,11 @@ models:
 	}
 }
 
-// TestBootstrapRestoresEmptyModels: an empty `models:` map is repopulated
-// with the managed profiles instead of erroring — same logic as a freshly
-// created config.yaml.
-func TestBootstrapRestoresEmptyModels(t *testing.T) {
+// TestBootstrapRejectsEmptyModels: a config.yaml with an empty `models:`
+// block has nothing for Active to point at; Bootstrap must error out with
+// a readable message rather than panic in the Active coercer. The user
+// is told exactly how to recover (add a profile or delete the file).
+func TestBootstrapRejectsEmptyModels(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
 	if err := os.MkdirAll(cdir, 0o755); err != nil {
@@ -311,14 +384,12 @@ func TestBootstrapRestoresEmptyModels(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cdir, "config.yaml"), yaml, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := Bootstrap(dir)
-	if err != nil {
-		t.Fatal(err)
+	_, _, err := Bootstrap(dir)
+	if err == nil {
+		t.Fatal("empty models map must be rejected, not silently coerced")
 	}
-	for _, name := range []string{"local", "hamrpass"} {
-		if _, ok := cfg.Models[name]; !ok {
-			t.Fatalf("managed profile %q was not restored", name)
-		}
+	if !strings.Contains(err.Error(), "no profiles configured") {
+		t.Fatalf("error should explain the problem, got: %v", err)
 	}
 }
 
