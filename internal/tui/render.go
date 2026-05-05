@@ -221,9 +221,6 @@ func (m Model) renderStatusBar() string {
 	if m.status != "" {
 		segs = appendStatus(segs, m.status)
 	}
-	if m.updateAvailable {
-		segs = appendStatus(segs, "↑ restart to update")
-	}
 	return strings.Join(segs, sep)
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
 	"github.com/codehamr/codehamr/internal/tools"
-	"github.com/codehamr/codehamr/internal/update"
 )
 
 // Defaults used before the terminal reports its size via WindowSizeMsg.
@@ -156,12 +154,6 @@ type Model struct {
 	// mutations stay on the UI thread.
 	gysd *gysd.Session
 
-	// updateAvailable is flipped by the passive startup probe in
-	// internal/update. It drives a single dim line in renderSplash; once the
-	// user types anything the splash vanishes and the hint with it. Never
-	// blocks startup or interrupts a turn.
-	updateAvailable bool
-
 	// liveContextSize is the per-profile, runtime-only context window
 	// reported by the server via X-Context-Window. Populated by Probe at
 	// activation and refreshed on every chat EventDone, so a server-side
@@ -238,12 +230,6 @@ const defaultPackFallback = 65536
 // pingMsg carries the result of a backend-reachability probe.
 type pingMsg struct{ ok bool }
 
-// updateAvailableMsg fires only when the passive update probe confirms the
-// running binary differs from the latest release's published sha256. No
-// negative counterpart: a silent check must stay silent if there's nothing
-// to say, so the renderer doesn't have to undo a false positive.
-type updateAvailableMsg struct{}
-
 // quitArmResetMsg fires ~3s after Ctrl+C arms the quit — if we haven't
 // already been quit or re-armed, clear the hint from the status bar.
 type quitArmResetMsg struct{}
@@ -262,7 +248,6 @@ func (m Model) Init() tea.Cmd {
 		textarea.Blink,
 		m.spinner.Tick,
 		connectivity,
-		checkUpdate(),
 	)
 }
 
@@ -336,10 +321,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case probeMsg:
 		return m.handleProbe(msg)
-
-	case updateAvailableMsg:
-		m.updateAvailable = true
-		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -715,23 +696,3 @@ func pingBackend(baseURL string) tea.Cmd {
 	}
 }
 
-// checkUpdate fires a single passive update probe during Init. It resolves
-// the running executable, hashes it, and compares against the latest
-// release's published sha256. A positive result emits updateAvailableMsg so
-// renderSplash can surface a dim hint; negative or errored results emit
-// nothing (returning nil from a tea.Cmd is a no-op dispatch). The whole
-// thing is bounded by update.fetchTimeout so it can never delay startup.
-func checkUpdate() tea.Cmd {
-	return func() tea.Msg {
-		exe, err := os.Executable()
-		if err != nil {
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if update.Check(ctx, exe) {
-			return updateAvailableMsg{}
-		}
-		return nil
-	}
-}

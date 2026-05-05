@@ -4,15 +4,19 @@
 // `codehamr_checksums.txt` asset that goreleaser uploads with every release.
 // Mismatch = the user's local binary is stale.
 //
-// The check is a signal only — this package never replaces the binary. It
-// exists so the TUI can show a dezent update hint on the splash; applying the
-// update is the user's job (re-run install.sh).
+// Both callsites are in main.go's maybeSelfUpdate, which runs once before
+// the TUI starts: Check decides whether an update exists, Apply atomically
+// replaces the running binary on disk, and the caller's syscall.Exec then
+// re-enters the new version in place — no second restart visible to the
+// user. The TUI itself carries no update awareness; one strategy, one
+// trigger point.
 //
-// Any network hiccup, offline machine, missing asset, or parse glitch returns
-// "no update" rather than surfacing an error: a startup banner that shouts
-// when the internet is flaky is worse than one that stays quiet. The
-// CODEHAMR_NO_UPDATE_CHECK=1 env var is the user escape hatch for air-gapped
-// setups or CI runs where a GitHub fetch is unwanted.
+// Any network hiccup, offline machine, missing asset, or parse glitch
+// returns "no update" rather than surfacing an error — a startup banner
+// that shouts when the internet is flaky is worse than one that stays
+// quiet. CODEHAMR_NO_UPDATE_CHECK=1 is the user escape hatch for
+// air-gapped setups, CI, and the post-update re-exec (which sets it so
+// the replacement child doesn't loop into a second check).
 package update
 
 import (
