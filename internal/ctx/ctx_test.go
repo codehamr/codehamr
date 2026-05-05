@@ -132,18 +132,6 @@ func TestPackKeepsPairedToolMessage(t *testing.T) {
 	}
 }
 
-func TestDropBanner(t *testing.T) {
-	r := PackResult{Dropped: 3, Kept: 10}
-	b := DropBanner(r)
-	if !strings.Contains(b, "3 oldest messages dropped") ||
-		!strings.Contains(b, "10 remaining") {
-		t.Fatalf("banner wrong: %q", b)
-	}
-	if DropBanner(PackResult{}) != "" {
-		t.Fatal("empty banner expected for no drops")
-	}
-}
-
 func TestBudget(t *testing.T) {
 	if got := Budget(65536); got != 65536-3000-1500-8000 {
 		t.Fatalf("budget wrong: %d", got)

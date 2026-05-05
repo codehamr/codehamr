@@ -488,9 +488,6 @@ func (m *Model) endTurn() {
 
 func (m *Model) buildMessages() []chmctx.Message {
 	r := chmctx.Pack(m.history, chmctx.Budget(m.activeContextSize()))
-	if banner := chmctx.DropBanner(r); banner != "" {
-		m.appendLine(styleWarn.Render(banner))
-	}
 	out := make([]chmctx.Message, 0, len(r.Messages)+1)
 	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: m.system})
 	return append(out, r.Messages...)

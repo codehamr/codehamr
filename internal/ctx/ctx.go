@@ -156,16 +156,6 @@ func dropOrphanTools(kept []Message) []Message {
 	return out
 }
 
-// DropBanner returns the one-line "context dropped" notification, or empty
-// when nothing was dropped.
-func DropBanner(r PackResult) string {
-	if r.Dropped <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("⚠ context: %d oldest messages dropped · %d remaining · /clear to reset",
-		r.Dropped, r.Kept)
-}
-
 // Budget subtracts the fixed reservations from the total context size.
 func Budget(ctxSize int) int {
 	b := ctxSize - FixedSystem - FixedTools - ResponseReserve
