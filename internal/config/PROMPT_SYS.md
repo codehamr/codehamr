@@ -79,6 +79,22 @@ Rules:
           evidence: "===== 4 passed in 1.2s ====="
 ```
 
+## Verify by project class
+
+| Class | Typical verify |
+|---|---|
+| Python | `pytest tests/test_X.py -x` |
+| Go | `go test ./pkg/X && go vet ./pkg/X` |
+| Rust | `cargo test --lib X` |
+| TypeScript / JS lib | `npx tsc --noEmit && npx vitest run X` |
+| Static HTML / text | `grep -q PATTERN file && [ -f X ]` |
+| Browser app (Canvas / DOM, runtime matters) | `pip install playwright && playwright install chromium`, then a script that loads the page headless, simulates input, asserts no `pageerror` / console errors. Lightweight alt without real rendering: `npm i -D happy-dom` + a node harness mocking DOM, runs game ticks. |
+| Long-running op (> 10 min) | spawn via `nohup bash`, poll, `grep` the log (worked example 3) |
+
+**Module-loading or `node --check` verifies are trivial** for browser / UI / game projects — they prove syntax, not behavior. Undeclared variables, wrong arg names, missing handlers only fire on real interaction; only a runtime harness catches them.
+
+If a needed tool is missing, install it inline (`pip install X`, `apt-get install -y nodejs npm`, `cargo install X`) — one-time cost per environment, then cached.
+
 ## Stuck commands and process recovery
 
 `verify` runs in its own process group: timeout or Ctrl+C kills the whole tree (parent shell + children) — no leak. But anything you spawn via `bash` (e.g. `nohup cmd &`) is NOT process-grouped: it survives across `bash` calls and across turn cancels. **You own its lifecycle.**
