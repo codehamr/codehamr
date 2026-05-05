@@ -20,14 +20,11 @@ type argOption struct {
 
 // command is one row in the command-level popover, --help, and the dispatch
 // table. `args`, if non-nil, supplies the argument-level popover entries.
-// `keepOpen` marks toggle-style commands (e.g. /plugins) whose arg-level
-// Enter should re-run the handler in place instead of closing the popover.
 type command struct {
 	name        string
 	description string
 	handler     func(Model, []string) (tea.Model, tea.Cmd)
 	args        func(Model) []argOption
-	keepOpen    bool
 }
 
 // commands lists every slash command. Order is the order shown in the popover
@@ -64,28 +61,6 @@ var commands = []command{
 					value:       n,
 					description: p.LLM + " @ " + p.URL,
 					current:     n == m.cfg.Active,
-				})
-			}
-			return out
-		},
-	},
-	{
-		name:        "/plugins",
-		description: "manage MCP servers",
-		handler:     (Model).cmdPlugin,
-		keepOpen:    true,
-		args: func(m Model) []argOption {
-			names := m.cfg.MCPServerNames()
-			out := make([]argOption, 0, len(names))
-			for _, n := range names {
-				s := m.cfg.MCPServers[n]
-				mark := "disabled"
-				if s.Enabled {
-					mark = "enabled"
-				}
-				out = append(out, argOption{
-					value:       n,
-					description: mark + " · " + s.Description,
 				})
 			}
 			return out
@@ -144,8 +119,7 @@ func (m Model) cmdModel(args []string) (tea.Model, tea.Cmd) {
 }
 
 // printModelList writes the "▸ active, name, llm @ url" rollup to scroll.
-// Mirror of printPluginList — same shape, same vocabulary, same call site
-// pattern from the no-args branch of the slash handler.
+// Called from the no-args branch of cmdModel.
 func (m *Model) printModelList() {
 	m.appendLine(styleDim.Render("models (▸ active, /models <name> to switch):"))
 	for _, n := range m.cfg.ModelNames() {
@@ -181,56 +155,6 @@ func (m *Model) rebuildClient() {
 	m.cli.BaseURL = strings.TrimRight(m.cfg.ActiveURL(), "/")
 	m.cli.Token = p.Key
 	m.cli.Model = p.LLM
-}
-
-func (m Model) cmdPlugin(args []string) (tea.Model, tea.Cmd) {
-	if len(args) == 0 {
-		m.printPluginList()
-		return m, nil
-	}
-	return m.togglePlugin(args[0]), nil
-}
-
-// printPluginList writes the "[✓] name  description" rollup to scroll.
-func (m *Model) printPluginList() {
-	m.appendLine(styleDim.Render("plugins (/plugins <name> toggles):"))
-	for _, name := range m.cfg.MCPServerNames() {
-		s := m.cfg.MCPServers[name]
-		mark := "[ ]"
-		if s.Enabled {
-			mark = "[✓]"
-		}
-		m.appendLine(fmt.Sprintf("  %s %s  %s", mark, name, styleDim.Render(s.Description)))
-	}
-}
-
-// togglePlugin flips Enabled on the named MCP server, persists, and starts
-// or stops the child process to match. Errors fall through to the scroll
-// banner so a failed save / spawn never silently rolls back the user's
-// intent.
-func (m Model) togglePlugin(name string) Model {
-	s, ok := m.cfg.MCPServers[name]
-	if !ok {
-		m.appendLine(styleWarn.Render("unknown plugin: " + name))
-		return m
-	}
-	s.Enabled = !s.Enabled
-	m.cfg.MCPServers[name] = s
-	if err := m.cfg.Save(); err != nil {
-		m.appendLine(styleError.Render("⚠ save: " + err.Error()))
-		return m
-	}
-	if s.Enabled {
-		if err := m.mcp.Spawn(name, s); err != nil {
-			m.appendLine(styleError.Render("⚠ spawn: " + err.Error()))
-			return m
-		}
-		m.appendLine(styleOK.Render("✓ " + name + " enabled"))
-	} else {
-		m.mcp.Stop(name)
-		m.appendLine(styleOK.Render("✓ " + name + " disabled"))
-	}
-	return m
 }
 
 func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {

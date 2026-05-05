@@ -59,7 +59,7 @@ func (m Model) handleGYSDTool(call chmctx.ToolCall) (tea.Model, tea.Cmd) {
 
 // applyGYSDResult turns a gysd.Result into a state mutation + tea.Cmd
 // pair. Three outcomes: end the loop (accepted done), yield to user
-// (rejected for S1-S7 / ask), or feed a tool-result back to the model.
+// (rejected for S1-S5 / ask), or feed a tool-result back to the model.
 func (m Model) applyGYSDResult(r gysd.Result, callID, callName string) (tea.Model, tea.Cmd) {
 	switch {
 	case r.EndLoop:

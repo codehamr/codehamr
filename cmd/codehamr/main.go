@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/codehamr/codehamr/internal/config"
 	"github.com/codehamr/codehamr/internal/llm"
-	"github.com/codehamr/codehamr/internal/mcp"
 	"github.com/codehamr/codehamr/internal/tui"
 	"github.com/codehamr/codehamr/internal/update"
 )
@@ -69,30 +67,11 @@ func main() {
 		defer tui.CloseDebugLog()
 	}
 
-	mgr := mcp.NewManager()
-	// Snapshot enabled MCP servers before launching the spawn goroutine.
-	// /plugins toggles write to cfg.MCPServers from the TUI goroutine; if
-	// SpawnAll iterated cfg.MCPServers concurrently, Go would panic with
-	// "concurrent map read and map write". The snapshot is taken on the
-	// main goroutine before any concurrent access can start.
-	mcpSnap := maps.Clone(cfg.MCPServers)
-	// Spawn MCP servers in the background so the TUI renders immediately.
-	// First-run `npx` downloads can take several seconds; without async,
-	// startup looks frozen. Tools become available as each server finishes.
-	go func() {
-		if errs := mgr.SpawnAll(mcpSnap); len(errs) > 0 {
-			for _, e := range errs {
-				fmt.Fprintln(os.Stderr, "⚠ mcp:", e)
-			}
-		}
-	}()
-	defer mgr.StopAll()
-
 	p := cfg.ActiveProfile()
 	client := llm.New(cfg.ActiveURL(), p.LLM, p.Key)
 
 	abs, _ := filepath.Abs(cwd)
-	m := tui.New(cfg, mgr, client, abs, version)
+	m := tui.New(cfg, client, abs, version)
 
 	// Inline mode (no AltScreen, no mouse capture): the TUI renders only
 	// the prompt + status bar live region at the bottom of the terminal,

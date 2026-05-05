@@ -56,7 +56,7 @@ func TestExecuteWriteFileWrapsResult(t *testing.T) {
 			"content": "hello",
 		},
 	}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if msg.Role != chmctx.RoleTool || msg.ToolCallID != "call_w" || msg.ToolName != "write_file" {
 		t.Fatalf("bad message: %+v", msg)
 	}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/codehamr/codehamr/internal/config"
 	"github.com/codehamr/codehamr/internal/llm"
-	"github.com/codehamr/codehamr/internal/mcp"
 )
 
 // TestResizeKeepsPromptInsideTerminal: in inline mode View() renders only
@@ -18,7 +17,7 @@ import (
 // bar past the bottom edge or wrap mid-prompt.
 func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, mcp.NewManager(), llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mx := m

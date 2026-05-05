@@ -48,11 +48,11 @@ func readEvent(ch <-chan llm.Event) tea.Cmd {
 
 // runToolCall executes one tool call off the UI goroutine. The parent context
 // is the per-turn root; a Ctrl+C cancel of the turn aborts the tool mid-run.
-func runToolCall(parent context.Context, call chmctx.ToolCall, disp tools.MCPDispatcher) tea.Cmd {
+func runToolCall(parent context.Context, call chmctx.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 		defer cancel()
-		return toolResultMsg{Msg: tools.Execute(ctx, call, disp)}
+		return toolResultMsg{Msg: tools.Execute(ctx, call)}
 	}
 }
 

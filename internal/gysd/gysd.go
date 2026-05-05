@@ -14,6 +14,7 @@
 package gysd
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,22 +29,26 @@ const (
 	ToolAsk    = "ask"
 )
 
-// Schranken thresholds. Tightened over several design rounds — every value
-// here is load-bearing, see data/gysd.md §5 for rationale and reset rules.
+// Schranken thresholds. Five deterministic guards, see data/gysd.md §5.
+//
+// The design is intentionally minimal: per-tool timeouts are model-set
+// (bash 1-3600s, verify 1-600s) and Ctrl+C is the universal escape, so
+// there is no turn-level wall-clock cap and no tool-call-count cap. The
+// remaining schranken target the failure modes those mechanisms cannot
+// catch: spamming verifies (S1), repeating identical calls (S2), failing
+// the same way (S3), and never landing on a loop tool (S4/S5).
 const (
-	MaxVerifyLog        = 30                // S1: verify cap per loop
-	MaxRecentCommands   = 5                 // S2: window
-	RepeatTriggerCount  = 3                 // S2: 3rd identical command yields
-	MaxRedStreak        = 3                 // S3: 3 consecutive reds yields
-	MaxToolCallsPerTurn = 25                // S4
-	MaxTurnDuration     = 10 * time.Minute  // S5
-	MaxS6Streak         = 3                 // S7: 3 consecutive non-loop turns
-	DefaultTimeout      = 60 * time.Second  // verify default
-	MaxTimeout          = 600 * time.Second // verify hard cap = 10min, matches S5
-	MaxOutputBytes      = 1 << 20           // 1 MB cap on stored verify output
-	HeadTailBytes       = 200 * 1024        // when capped: first+last 200kB each
-	MinEvidenceLen      = 20                // done.evidence min length
-	MinQuestionLen      = 8                 // ask.question min length after trim
+	MaxVerifyLog       = 30                // S1: verify cap per loop
+	MaxRecentCalls     = 5                 // S2: window
+	RepeatTriggerCount = 3                 // S2: 3rd identical call yields
+	MaxRedStreak       = 3                 // S3: 3 consecutive reds yields
+	MaxMissingStreak   = 3                 // S5: 3 consecutive non-loop turns
+	DefaultTimeout     = 60 * time.Second  // verify default
+	MaxTimeout         = 600 * time.Second // verify hard cap (use background-spawn for longer ops)
+	MaxOutputBytes     = 1 << 20           // 1 MB cap on stored verify output
+	HeadTailBytes      = 200 * 1024        // when capped: first+last 200kB each
+	MinEvidenceLen     = 20                // done.evidence min length
+	MinQuestionLen     = 8                 // ask.question min length after trim
 )
 
 // VerifyEntry is one stored verify outcome. Output is ANSI-stripped and
@@ -59,10 +64,8 @@ type VerifyEntry struct {
 type Session struct {
 	VerifyLog        []VerifyEntry
 	RedStreak        int
-	RecentCommands   []string
-	S6Streak         int
-	ToolCallsTurn    int
-	TurnStart        time.Time
+	RecentCalls      []string // canonical "name|json(args)" keys, most-recent at the end (S2)
+	MissingStreak    int      // consecutive turns ending without verify/done/ask (S5)
 	LoopToolThisTurn bool
 }
 
@@ -87,41 +90,71 @@ func IsLoopTool(name string) bool {
 	return false
 }
 
-// BeginTurn resets per-turn counters. Called by the TUI whenever a fresh
-// LLM round starts (user submit, plan-style nudge, etc.).
+// BeginTurn resets the per-turn loop-tool flag. Called by the TUI whenever
+// a fresh LLM round starts (user submit, missing-loop-tool nudge, etc.).
+// Note that S2's RecentCalls ring deliberately survives across turns — a
+// repeat that straddles a turn boundary is still a repeat.
 func (s *Session) BeginTurn() {
-	s.ToolCallsTurn = 0
-	s.TurnStart = time.Now()
 	s.LoopToolThisTurn = false
 }
 
-// NoteToolCall is called by the TUI before dispatching any tool. Bumps the
-// per-turn counter and yields when S4 is exceeded — the synthetic UserBlock
-// is what the user sees in scrollback when the loop pauses.
-func (s *Session) NoteToolCall() Result {
-	s.ToolCallsTurn++
-	if s.ToolCallsTurn > MaxToolCallsPerTurn {
+// NoteToolCall is the S2 (identical-call repeat) gate. Called by the TUI
+// before dispatching ANY tool — bash, write_file, verify, done, ask. The
+// canonical key is `name|json(args)` with sorted JSON keys (encoding/json
+// sorts map keys deterministically), so logically-equal arg sets always
+// produce the same key regardless of insertion order.
+//
+// Yield fires on the RepeatTriggerCount-th identical call within the last
+// MaxRecentCalls dispatches. On non-yield the key is appended to the ring
+// (oldest evicted past MaxRecentCalls) so the next call sees this attempt.
+func (s *Session) NoteToolCall(name string, args map[string]any) Result {
+	key := callKey(name, args)
+	matches := 0
+	for _, prev := range s.RecentCalls {
+		if prev == key {
+			matches++
+		}
+	}
+	if matches >= RepeatTriggerCount-1 {
 		return Result{
 			Yield: true,
 			UserBlock: fmt.Sprintf(
-				"⚠ GYSD: %d tool calls in one turn without verify/done/ask — yielding.",
-				s.ToolCallsTurn),
+				"⚠ GYSD: same %s call repeated %d×. Try a different approach or /clear.",
+				name, RepeatTriggerCount),
 		}
+	}
+	s.RecentCalls = append(s.RecentCalls, key)
+	if len(s.RecentCalls) > MaxRecentCalls {
+		s.RecentCalls = s.RecentCalls[len(s.RecentCalls)-MaxRecentCalls:]
 	}
 	return Result{}
 }
 
-// PreVerify validates command, clamps the timeout, and checks S1/S2. If
+// callKey produces a deterministic comparison key for a tool call. JSON
+// marshalling sorts map keys alphabetically (encoding/json contract since
+// Go 1.12), so {"a":1,"b":2} and {"b":2,"a":1} collapse to the same key.
+// On marshal failure (NaN/Inf floats etc.) we fall back to fmt.Sprintf so
+// malformed calls still distinguish themselves rather than collapsing into
+// one bucket and triggering false S2s.
+func callKey(name string, args map[string]any) string {
+	if b, err := json.Marshal(args); err == nil {
+		return name + "|" + string(b)
+	}
+	return name + "|" + fmt.Sprintf("%v", args)
+}
+
+// PreVerify validates command, clamps the timeout, and checks S1. If
 // run==false the caller emits the embedded Result and skips bash entirely;
 // if run==true it executes bash with the returned timeout and then calls
-// RecordVerify.
+// RecordVerify. S2 (identical-call) is enforced upstream by NoteToolCall
+// in dispatchNextTool — every tool, not just verify.
 func (s *Session) PreVerify(command string, timeoutSec int) (run bool, timeout time.Duration, result Result) {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {
 		return false, 0, Result{ToolPayload: "verify rejected: command empty."}
 	}
 
-	// Clamp timeout to [1s, 600s]. timeoutSec==0 means default.
+	// Clamp timeout to [1s, MaxTimeout]. timeoutSec==0 means default.
 	switch {
 	case timeoutSec <= 0:
 		timeout = DefaultTimeout
@@ -141,31 +174,6 @@ func (s *Session) PreVerify(command string, timeoutSec int) (run bool, timeout t
 		}
 	}
 
-	// S2: identical command 3× in last MaxRecentCommands. matches counts
-	// prior occurrences; this attempt would be the (matches+1)-th. Yield
-	// when it would be the 3rd, i.e. matches >= RepeatTriggerCount-1.
-	matches := 0
-	for _, prev := range s.RecentCommands {
-		if prev == cmd {
-			matches++
-		}
-	}
-	if matches >= RepeatTriggerCount-1 {
-		var lastOutput string
-		for i := len(s.VerifyLog) - 1; i >= 0; i-- {
-			if s.VerifyLog[i].Command == cmd {
-				lastOutput = s.VerifyLog[i].Output
-				break
-			}
-		}
-		return false, 0, Result{
-			Yield: true,
-			UserBlock: fmt.Sprintf(
-				"⚠ GYSD: same verify command tried %d×. Try a different approach or /clear.\n\nLast output:\n%s",
-				RepeatTriggerCount, chmctx.Truncate(lastOutput)),
-		}
-	}
-
 	return true, timeout, Result{}
 }
 
@@ -174,7 +182,7 @@ func (s *Session) PreVerify(command string, timeoutSec int) (run bool, timeout t
 // turnCtx was canceled (user Ctrl+C) — no log entry, no streak bump.
 func (s *Session) RecordVerify(command, output string, exitCode int, canceled bool) Result {
 	s.LoopToolThisTurn = true
-	s.S6Streak = 0
+	s.MissingStreak = 0
 	if canceled {
 		return Result{ToolPayload: output + "\n(cancelled)"}
 	}
@@ -182,12 +190,6 @@ func (s *Session) RecordVerify(command, output string, exitCode int, canceled bo
 	stripped := stripANSI(output)
 	capped := capOutput(stripped)
 	green := exitCode == 0
-
-	// S2 ring: append, drop oldest beyond window.
-	s.RecentCommands = append(s.RecentCommands, command)
-	if len(s.RecentCommands) > MaxRecentCommands {
-		s.RecentCommands = s.RecentCommands[len(s.RecentCommands)-MaxRecentCommands:]
-	}
 
 	// FIFO log.
 	s.VerifyLog = append(s.VerifyLog, VerifyEntry{
@@ -236,7 +238,7 @@ func (s *Session) buildRedStreakBlock() string {
 // a tool-result that keeps the turn running (model can verify and retry).
 func (s *Session) HandleDone(summary, evidence string) Result {
 	s.LoopToolThisTurn = true
-	s.S6Streak = 0
+	s.MissingStreak = 0
 	if strings.TrimSpace(summary) == "" {
 		return Result{ToolPayload: "done rejected: summary empty."}
 	}
@@ -259,7 +261,7 @@ func (s *Session) HandleDone(summary, evidence string) Result {
 // must be at least MinQuestionLen.
 func (s *Session) HandleAsk(question string) Result {
 	s.LoopToolThisTurn = true
-	s.S6Streak = 0
+	s.MissingStreak = 0
 	q := strings.TrimSpace(question)
 	if len(q) < MinQuestionLen {
 		return Result{ToolPayload: fmt.Sprintf(
@@ -271,17 +273,18 @@ func (s *Session) HandleAsk(question string) Result {
 
 // EnsureLoopTool is called by the TUI after a turn closes with no pending
 // tool calls and the assistant message is recorded. If a loop tool ran in
-// the turn: zero-value, TUI ends the turn normally. If not: nudge as
-// user-turn (ToolPayload), or yield (S7) when S6Streak hit MaxS6Streak.
+// the turn: zero-value, TUI ends the turn normally (S4 ok). If not: nudge
+// as user-turn (ToolPayload), or yield (S5) when MissingStreak hits
+// MaxMissingStreak.
 func (s *Session) EnsureLoopTool() Result {
 	if s.LoopToolThisTurn {
-		s.S6Streak = 0
+		s.MissingStreak = 0
 		return Result{}
 	}
-	s.S6Streak++
-	if s.S6Streak >= MaxS6Streak {
-		streak := s.S6Streak
-		s.S6Streak = 0
+	s.MissingStreak++
+	if s.MissingStreak >= MaxMissingStreak {
+		streak := s.MissingStreak
+		s.MissingStreak = 0
 		return Result{
 			Yield: true,
 			UserBlock: fmt.Sprintf(
@@ -294,15 +297,6 @@ func (s *Session) EnsureLoopTool() Result {
 	}
 }
 
-// TurnExpired reports whether the per-turn wall-clock budget is gone. The
-// TUI calls this on every stream event; first true triggers a turn cancel.
-func (s *Session) TurnExpired() bool {
-	if s.TurnStart.IsZero() {
-		return false
-	}
-	return time.Since(s.TurnStart) > MaxTurnDuration
-}
-
 // AfterUserMessage clears per-loop state when the user replies to a yield.
 // Counters reset; new user message starts a fresh sub-loop. Distinct from
 // Reset (full wipe) so the difference between "loop completed" and "loop
@@ -310,8 +304,8 @@ func (s *Session) TurnExpired() bool {
 func (s *Session) AfterUserMessage() {
 	s.VerifyLog = nil
 	s.RedStreak = 0
-	s.RecentCommands = nil
-	s.S6Streak = 0
+	s.RecentCalls = nil
+	s.MissingStreak = 0
 }
 
 // Reset wipes the whole Session. Used after accepted done and /clear.
@@ -321,7 +315,7 @@ func (s *Session) Reset() {
 
 // capOutput truncates oversized verify output before storing. Keeps first
 // HeadTailBytes + last HeadTailBytes around a marker. Mirrors the bash-tool
-// output-truncation principle (PROMPT_SYS.md:120) so the model can re-run
+// output-truncation principle (PROMPT_SYS.md) so the model can re-run
 // a more targeted check if it needs the missing middle.
 func capOutput(s string) string {
 	if len(s) <= MaxOutputBytes {

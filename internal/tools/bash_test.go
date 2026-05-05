@@ -47,7 +47,7 @@ func TestBashCustomTimeoutHonored(t *testing.T) {
 			"timeout_seconds": float64(1),
 		},
 	}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("custom timeout ignored; elapsed %s", elapsed)
 	}
@@ -67,7 +67,7 @@ func TestBashTimeoutCappedAtOneHour(t *testing.T) {
 			"timeout_seconds": float64(999999),
 		},
 	}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if !strings.Contains(msg.Content, "clamped") {
 		t.Fatalf("expected echo output: %q", msg.Content)
 	}
@@ -87,7 +87,7 @@ func TestBashTimeoutOverflowClamped(t *testing.T) {
 			"timeout_seconds": float64(1e18),
 		},
 	}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if !strings.Contains(msg.Content, "ok") {
 		t.Fatalf("overflow clamp: expected echo output, got %q", msg.Content)
 	}
@@ -109,7 +109,7 @@ func TestExecuteBashWrapsResult(t *testing.T) {
 		ID: "call_1", Name: "bash",
 		Arguments: map[string]any{"cmd": "echo hi"},
 	}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if msg.Role != chmctx.RoleTool || msg.ToolCallID != "call_1" || msg.ToolName != "bash" {
 		t.Fatalf("bad message: %+v", msg)
 	}
@@ -118,70 +118,9 @@ func TestExecuteBashWrapsResult(t *testing.T) {
 	}
 }
 
-// fakeDispatcher implements MCPDispatcher with canned responses so the
-// MCP-error path through runRaw can be exercised without spawning a server.
-type fakeDispatcher struct {
-	hasName string
-	out     string
-	err     error
-}
-
-func (f fakeDispatcher) Has(name string) (string, bool) {
-	if name == f.hasName {
-		return "fake-server", true
-	}
-	return "", false
-}
-
-func (f fakeDispatcher) Call(_ context.Context, _, _ string, _ map[string]any) (string, error) {
-	return f.out, f.err
-}
-
-// TestExecuteMCPErrorPreservesContent: when an MCP server returns isError=true
-// the diagnostic text travels in the content body alongside the sentinel
-// error. Dropping the body left the model staring at "(tool error: tool
-// reported error)" with no clue what to react to. The body must travel through
-// to the tool-result message.
-func TestExecuteMCPErrorPreservesContent(t *testing.T) {
-	disp := fakeDispatcher{
-		hasName: "lookup",
-		out:     "rate limit exceeded · retry in 30s",
-		err:     errTool,
-	}
-	call := chmctx.ToolCall{ID: "x", Name: "lookup"}
-	msg := Execute(context.Background(), call, disp)
-	if !strings.Contains(msg.Content, "rate limit exceeded") {
-		t.Fatalf("MCP error body must travel through to tool result: %q", msg.Content)
-	}
-	if !strings.Contains(msg.Content, "tool error") {
-		t.Fatalf("error sentinel must still be present: %q", msg.Content)
-	}
-}
-
-// TestExecuteMCPErrorEmptyBodyFallsBackToSentinel: a dispatcher returning an
-// error with no content body produces the bare "(tool error: ...)" line, no
-// stray newlines or empty body indicators.
-func TestExecuteMCPErrorEmptyBodyFallsBackToSentinel(t *testing.T) {
-	disp := fakeDispatcher{hasName: "lookup", err: errTool}
-	call := chmctx.ToolCall{ID: "x", Name: "lookup"}
-	msg := Execute(context.Background(), call, disp)
-	if strings.Contains(msg.Content, "\n") {
-		t.Fatalf("empty-body error should not carry a trailing newline: %q", msg.Content)
-	}
-	if !strings.Contains(msg.Content, "tool error") {
-		t.Fatalf("error sentinel missing: %q", msg.Content)
-	}
-}
-
-var errTool = sentinelErr("tool reported error")
-
-type sentinelErr string
-
-func (e sentinelErr) Error() string { return string(e) }
-
 func TestExecuteUnknownTool(t *testing.T) {
 	call := chmctx.ToolCall{ID: "x", Name: "nope"}
-	msg := Execute(context.Background(), call, nil)
+	msg := Execute(context.Background(), call)
 	if !strings.Contains(msg.Content, "unknown tool") {
 		t.Fatalf("expected unknown-tool error: %q", msg.Content)
 	}

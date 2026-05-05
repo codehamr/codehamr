@@ -16,9 +16,7 @@ import (
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
-	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
-	"github.com/codehamr/codehamr/internal/mcp"
 )
 
 // newTestModel wires a model against a mock OpenAI SSE server so we can
@@ -35,7 +33,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 	}
 	cfg.ActiveProfile().URL = srv.URL
 	client := llm.New(srv.URL, cfg.ActiveProfile().LLM, "")
-	m := New(cfg, mcp.NewManager(), client, t.TempDir(), "test")
+	m := New(cfg, client, t.TempDir(), "test")
 	// give it a size so view() doesn't panic
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	return sized.(Model)
@@ -48,7 +46,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	projectDir := "/workspaces/codehamr"
-	m := New(cfg, mcp.NewManager(), llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
 	if !strings.Contains(m.system, "investigate first") {
 		t.Fatalf("system prompt missing the 'investigate first' rule:\n%s", m.system)
 	}
@@ -92,7 +90,7 @@ func TestPlaceholderMentionsTab(t *testing.T) {
 	if !strings.Contains(view, "/ or Tab for commands") {
 		t.Fatalf("placeholder should mention both / and Tab: %s", view)
 	}
-	if strings.Contains(view, "/models") || strings.Contains(view, "/plugins /clear") {
+	if strings.Contains(view, "/models") || strings.Contains(view, "/clear") {
 		t.Fatalf("placeholder still enumerates commands: %s", view)
 	}
 }
@@ -523,7 +521,7 @@ func TestBackendLabelShowsActiveProfile(t *testing.T) {
 func TestPrintHelpListsAllCommands(t *testing.T) {
 	var buf bytes.Buffer
 	PrintHelp(&buf)
-	for _, want := range []string{"/clear", "/models", "/plugins", "/hamrpass"} {
+	for _, want := range []string{"/clear", "/models", "/hamrpass"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("PrintHelp missing %q:\n%s", want, buf.String())
 		}
@@ -572,19 +570,6 @@ func TestSlashClearResetsHistory(t *testing.T) {
 	m2, _ := m.runSlash("/clear")
 	if len(m2.(Model).history) != 0 {
 		t.Fatal("/clear must drop history")
-	}
-}
-
-func TestSlashPluginToggle(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.cfg.MCPServers = map[string]config.MCPServer{
-		"fake": {Command: "echo", Enabled: false, Description: "x"},
-	}
-	m2, _ := m.runSlash("/plugins fake")
-	// spawn may fail because `echo` isn't an MCP server, but the config
-	// should reflect the toggle intent.
-	if !m2.(Model).cfg.MCPServers["fake"].Enabled {
-		t.Fatal("expected plugin to flip to enabled in config")
 	}
 }
 
@@ -741,7 +726,7 @@ func TestStatusBarOmitsBudgetWithoutHeaders(t *testing.T) {
 // WindowSizeMsg arrives, View must not panic or emit garbled layout.
 func TestViewHandlesZeroWidth(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, mcp.NewManager(), llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	m.width = 0 // simulate no WindowSizeMsg yet
 	if got := m.View(); got != "" {
 		t.Fatalf("zero-width view should be empty, got %q", got)
@@ -1013,46 +998,47 @@ func TestSessionTokensSurviveFinalizeTurn(t *testing.T) {
 	}
 }
 
-// TestS4ToolCapYieldsTurn: when gysd's per-turn tool-call counter exceeds
-// MaxToolCallsPerTurn, dispatchNextTool must yield — pending dropped, ctx
-// cancelled, phase=idle, scrollback explains the yield. Prevents qwen-class
-// intra-stream tool-call loops from burning context.
-func TestS4ToolCapYieldsTurn(t *testing.T) {
+// TestS2RepeatYieldsTurn: when the same tool call (name + canonical args)
+// would be the 3rd identical attempt within MaxRecentCalls, dispatchNextTool
+// must yield — pending dropped, ctx cancelled, phase=idle, scrollback explains
+// the yield. This is the universal repeat-detector that replaces the per-turn
+// tool-call cap; it works for bash, write_file, verify, done, and ask alike.
+func TestS2RepeatYieldsTurn(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	m.turnCtx = ctx
 	m.cancel = cancel
 	m.phase = phaseThinking
-	// Pre-load gysd to one shy of the cap so the next NoteToolCall trips it.
-	m.gysd.BeginTurn()
-	for i := 0; i < gysd.MaxToolCallsPerTurn; i++ {
-		m.gysd.NoteToolCall()
-	}
-	m.pending = []chmctx.ToolCall{{Name: "bash", Arguments: map[string]any{"cmd": "echo x"}}}
+	// Pre-load the ring with two identical bash calls. The next dispatch
+	// will be the 3rd and S2 should fire.
+	args := map[string]any{"cmd": "echo x"}
+	m.gysd.NoteToolCall("bash", args)
+	m.gysd.NoteToolCall("bash", args)
+	m.pending = []chmctx.ToolCall{{Name: "bash", Arguments: args}}
 
 	out, _ := m.Update(streamClosedMsg{})
 	om := out.(Model)
 
 	if om.phase.active() {
-		t.Fatalf("phase must be idle after S4 yield, got %v", om.phase)
+		t.Fatalf("phase must be idle after S2 yield, got %v", om.phase)
 	}
 	if om.cancel != nil {
-		t.Fatal("cancel must be cleared after S4 yield")
+		t.Fatal("cancel must be cleared after S2 yield")
 	}
 	if om.turnCtx != nil {
-		t.Fatal("turnCtx must be cleared after S4 yield")
+		t.Fatal("turnCtx must be cleared after S2 yield")
 	}
 	if len(om.pending) != 0 {
 		t.Fatalf("pending must be dropped: %+v", om.pending)
 	}
-	if !strings.Contains(stripANSI(om.scroll.String()), "tool calls in one turn") {
-		t.Fatalf("scrollback missing S4 yield notice: %q", stripANSI(om.scroll.String()))
+	if !strings.Contains(stripANSI(om.scroll.String()), "bash call repeated 3×") {
+		t.Fatalf("scrollback missing S2 yield notice: %q", stripANSI(om.scroll.String()))
 	}
 	select {
 	case <-ctx.Done():
 	default:
-		t.Fatal("underlying context was not cancelled by S4 yield")
+		t.Fatal("underlying context was not cancelled by S2 yield")
 	}
 }
 
@@ -1331,19 +1317,19 @@ func TestHandleStreamDrainsAfterCancel(t *testing.T) {
 // TestHandleStreamClosedSkipsAdvanceAfterCancel: Ctrl+C during a turn
 // leaves phase=idle; the deferred streamClosedMsg must not auto-restart
 // a new turn (which would surprise the user with the loop re-nudging
-// itself after they asked to stop). gysd S6Streak should also stay put.
+// itself after they asked to stop). gysd MissingStreak should also stay put.
 func TestHandleStreamClosedSkipsAdvanceAfterCancel(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.phase = phaseIdle // handleCtrlC already finalised
-	m.gysd.S6Streak = 1
+	m.gysd.MissingStreak = 1
 
 	out, cmd := m.handleStreamClosed()
 	om := out.(Model)
 	if cmd != nil {
 		t.Fatal("stale close after cancel must NOT return a new-turn Cmd")
 	}
-	if om.gysd.S6Streak != 1 {
-		t.Fatalf("S6Streak should not tick on stale close: got %d", om.gysd.S6Streak)
+	if om.gysd.MissingStreak != 1 {
+		t.Fatalf("MissingStreak should not tick on stale close: got %d", om.gysd.MissingStreak)
 	}
 }
 
@@ -1461,97 +1447,6 @@ func drain(m tea.Model, cmd tea.Cmd) (tea.Model, []tea.Msg) {
 	return m, seen
 }
 
-// TestCommandKeepOpenFlags: /plugins is toggle-style — Enter on an arg keeps
-// the popover open. /models is select-and-close. /clear has no arg menu; the
-// flag is irrelevant for it but must default to false.
-func TestCommandKeepOpenFlags(t *testing.T) {
-	want := map[string]bool{
-		"/plugins":  true,
-		"/models":   false,
-		"/clear":    false,
-		"/hamrpass": false,
-	}
-	for _, c := range commands {
-		got, ok := want[c.name]
-		if !ok {
-			t.Fatalf("unexpected command %q in slice", c.name)
-		}
-		if c.keepOpen != got {
-			t.Fatalf("%s.keepOpen = %v, want %v", c.name, c.keepOpen, got)
-		}
-	}
-}
-
-// TestPluginsArgEnterStaysOpenAndToggles: inside /plugins <arg>, Enter must
-// (a) toggle the selected plugin in config, (b) keep the popover open at
-// arg-level, (c) reset the textarea to "/plugins " so the full list is
-// visible again, (d) keep the selection on the plugin that was just toggled
-// so a second Enter toggles it back.
-func TestPluginsArgEnterStaysOpenAndToggles(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.cfg.MCPServers = map[string]config.MCPServer{
-		"alpha": {Command: "true", Enabled: false, Description: "a"},
-		"beta":  {Command: "true", Enabled: false, Description: "b"},
-	}
-	mm := typeInto(m, "/plugins ")
-	if !mm.suggestArgLevel {
-		t.Fatal("precondition: arg popover open")
-	}
-	// move selection off the default row so we know the toggle follows selection
-	mm2, _ := mm.Update(tea.KeyMsg{Type: tea.KeyDown})
-	target := mm2.(Model).suggest[mm2.(Model).suggestIdx].value // alpha or beta — whichever Down lands on
-	before := mm2.(Model).cfg.MCPServers[target].Enabled
-
-	out, _ := mm2.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
-	om := out.(Model)
-
-	if om.cfg.MCPServers[target].Enabled == before {
-		t.Fatalf("%s should have toggled; before=%v after=%v",
-			target, before, om.cfg.MCPServers[target].Enabled)
-	}
-	if !om.popoverOpen() || !om.suggestArgLevel {
-		t.Fatalf("popover should stay open at arg-level: open=%v arg=%v",
-			om.popoverOpen(), om.suggestArgLevel)
-	}
-	if om.ta.Value() != "/plugins " {
-		t.Fatalf("textarea should reset to '/plugins ', got %q", om.ta.Value())
-	}
-	if om.suggest[om.suggestIdx].value != target {
-		t.Fatalf("selection should stay on %q, got %q",
-			target, om.suggest[om.suggestIdx].value)
-	}
-}
-
-// TestEscFromArgReturnsToCommandLevel: Esc inside /plugins <arg> trims the
-// textarea to the command name, re-opens the command-level popover filtered
-// to that command, and does not close the popover.
-func TestEscFromArgReturnsToCommandLevel(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.cfg.MCPServers = map[string]config.MCPServer{
-		"alpha": {Command: "true", Description: "a"},
-	}
-	mm := typeInto(m, "/plugins ")
-	if !mm.suggestArgLevel {
-		t.Fatal("precondition: arg popover open")
-	}
-	out, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	om := out.(Model)
-
-	if !om.popoverOpen() {
-		t.Fatal("Esc from arg-level should leave popover open at command-level")
-	}
-	if om.suggestArgLevel {
-		t.Fatal("Esc should demote popover from arg-level to command-level")
-	}
-	if om.ta.Value() != "/plugins" {
-		t.Fatalf("Esc should trim textarea to '/plugins', got %q", om.ta.Value())
-	}
-	names := suggestNames(om)
-	if len(names) != 1 || names[0] != "/plugins" {
-		t.Fatalf("command-level popover should show only /plugins, got %v", names)
-	}
-}
-
 // TestPopoverRenderHasNoMarker: no row in the rendered popover is prefixed
 // with the old `▸ ` arrow or a 2-space marker. Selection is a colour change,
 // not a marker.
@@ -1572,7 +1467,7 @@ func TestPopoverRenderHasNoMarker(t *testing.T) {
 // the Update wrapper drains via tea.Println in production).
 func TestSplashEmittedOnFirstSize(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, mcp.NewManager(), llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	out, _ := m.update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	om := out.(Model)
 	joined := stripANSI(strings.Join(om.outbox, "\n"))

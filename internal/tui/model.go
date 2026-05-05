@@ -18,7 +18,6 @@ import (
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
-	"github.com/codehamr/codehamr/internal/mcp"
 	"github.com/codehamr/codehamr/internal/tools"
 	"github.com/codehamr/codehamr/internal/update"
 )
@@ -64,7 +63,6 @@ type Model struct {
 	ProjectDir string
 
 	cfg *config.Config
-	mcp *mcp.Manager
 	cli *llm.Client
 
 	history []chmctx.Message // full conversation minus the system prompt
@@ -152,10 +150,10 @@ type Model struct {
 	phase  phase  // idle / thinking / streaming / running
 
 	// gysd holds the loop state machine: VerifyLog (evidence pool for
-	// `done`), per-turn tool-call counter, S6/S7 streak counters, and
-	// the deterministic Schranken from data/gysd.md. One instance per
-	// Model; the package never spawns goroutines so all mutations stay
-	// on the UI thread.
+	// `done`), recent-call ring (S2), red-streak / missing-loop-tool
+	// counters, and the deterministic Schranken from data/gysd.md. One
+	// instance per Model; the package never spawns goroutines so all
+	// mutations stay on the UI thread.
 	gysd *gysd.Session
 
 	// updateAvailable is flipped by the passive startup probe in
@@ -175,7 +173,7 @@ type Model struct {
 	liveContextSize map[string]int
 }
 
-func New(cfg *config.Config, mgr *mcp.Manager, cli *llm.Client, projectDir, version string) Model {
+func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model {
 	ta := newPromptInput()
 
 	// Fixed dark style — WithAutoStyle queries the terminal (OSC 11) before
@@ -192,7 +190,6 @@ func New(cfg *config.Config, mgr *mcp.Manager, cli *llm.Client, projectDir, vers
 		Version:    version,
 		ProjectDir: projectDir,
 		cfg:        cfg,
-		mcp:        mgr,
 		cli:        cli,
 		system:     buildSystem(projectDir),
 		ta:         ta,
@@ -423,9 +420,9 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		return m.runSlash(sendText)
 	}
 	// Every user message starts a fresh GYSD sub-loop: the previous
-	// VerifyLog, RedStreak, and S6 streak don't carry into the next
-	// goal. The model's history persists separately — only the
-	// orchestrator's evidence pool is wiped.
+	// VerifyLog, RedStreak, RecentCalls, and missing-loop-tool streak
+	// don't carry into the next goal. The model's history persists
+	// separately — only the orchestrator's evidence pool is wiped.
 	m.gysd.AfterUserMessage()
 	dbgWritef("user", "%s", sendText)
 	return m, m.appendUserTurn(sendText)
@@ -455,10 +452,10 @@ func (m *Model) installTurnContext() context.Context {
 }
 
 // beginTurn installs a fresh per-turn context, flips phase to thinking,
-// resets the gysd per-turn counters (S4 cap, S5 wall-clock, loop-tool
-// flag), and returns the chat stream-reader Cmd. Every path that starts
-// a new LLM round (user submit, gysd S6 nudge) funnels through here so
-// Ctrl+C cancels the whole cascade in one m.cancel() call.
+// resets the per-turn loop-tool flag, and returns the chat stream-reader
+// Cmd. Every path that starts a new LLM round (user submit, S4 nudge for
+// missing loop tool) funnels through here so Ctrl+C cancels the whole
+// cascade in one m.cancel() call.
 func (m *Model) beginTurn() tea.Cmd {
 	m.installTurnContext()
 	m.gysd.BeginTurn()
@@ -503,7 +500,6 @@ func (m *Model) buildTools() []llm.Tool {
 	out := []llm.Tool{}
 	out = append(out, schemaToTool(tools.BashSchema()))
 	out = append(out, schemaToTool(tools.WriteFileSchema()))
-	out = append(out, m.mcp.Tools()...)
 	// GYSD loop tools (verify/done/ask) are always exposed alongside
 	// bash/write_file — one mode, no phase gating, no triage. The
 	// orchestrator enforces "every turn ends with one of these three"
@@ -536,14 +532,6 @@ func schemaToTool(s map[string]any) llm.Tool {
 func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
 	if !m.phase.active() {
 		return m, readEvent(m.stream)
-	}
-	// GYSD S5: wall-clock cap per turn. Cancel the turn cascade if the
-	// per-turn budget is exhausted; abortTurn handles flushing + banner.
-	if m.gysd.TurnExpired() {
-		m.abortTurn(styleWarn.Render(fmt.Sprintf(
-			"⚠ GYSD: turn exceeded %s — cancelled. Restart or split the task smaller.",
-			gysd.MaxTurnDuration)))
-		return m, nil
 	}
 	switch e.Kind {
 	case llm.EventContent:
@@ -658,7 +646,7 @@ func (m *Model) finalizeTurn() {
 
 // handleStreamClosed drives what happens after the LLM stream finishes for
 // one round. If tool calls are pending, dispatch the next one. Otherwise
-// finalize the turn, run the GYSD loop-conformity check (S6/S7), and
+// finalize the turn, run the GYSD loop-conformity check (S4/S5), and
 // either nudge for verify/done/ask, yield to the user, or end normally.
 func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 	m.stream = nil
@@ -671,9 +659,9 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 		return m.dispatchNextTool()
 	}
 	m.finalizeTurn()
-	// GYSD S6/S7: a turn that didn't end with verify/done/ask gets a
+	// GYSD S4/S5: a turn that didn't end with verify/done/ask gets a
 	// nudge appended as a user-turn (re-enters chat with one more
-	// chance), or yields hard once the streak hits MaxS6Streak.
+	// chance), or yields hard once the streak hits MaxMissingStreak.
 	r := m.gysd.EnsureLoopTool()
 	switch {
 	case r.Yield:
@@ -689,22 +677,23 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 
 // dispatchNextTool pops the next pending tool call and routes it. GYSD
 // loop tools (verify/done/ask) short-circuit through gysd.Session;
-// everything else (bash, write_file, MCP) flows through the regular
-// runToolCall path. S4 (per-turn tool-call cap) is enforced here before
-// any dispatch — overrun aborts the whole pending queue and yields.
+// everything else (bash, write_file) flows through runToolCall. S2
+// (identical-call repeat detector) is enforced here before any dispatch —
+// 3rd identical call (name + canonical args) in the last MaxRecentCalls
+// aborts the whole pending queue and yields.
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
-	if r := m.gysd.NoteToolCall(); r.Yield {
+	call := m.pending[0]
+	m.pending = m.pending[1:]
+	if r := m.gysd.NoteToolCall(call.Name, call.Arguments); r.Yield {
 		m.abortTurn(styleWarn.Render(r.UserBlock))
 		return m, nil
 	}
-	call := m.pending[0]
-	m.pending = m.pending[1:]
 	m.appendLine(styleDim.Render(tools.InlineStatus(call)))
 	if gysd.IsLoopTool(call.Name) {
 		return m.handleGYSDTool(call)
 	}
 	m.phase = phaseRunning
-	return m, runToolCall(m.turnCtx, call, m.mcp)
+	return m, runToolCall(m.turnCtx, call)
 }
 
 // cursorOnFirstLine: true when ↑ should walk the prompt history instead of

@@ -1,5 +1,5 @@
-// Package tools holds the bash executor plus the tool-router that dispatches
-// assistant tool calls to either bash or a configured MCP server.
+// Package tools holds the local executors (bash, write_file) and the
+// tool-router that dispatches assistant tool calls to them by name.
 package tools
 
 import (
@@ -86,17 +86,10 @@ func BashSchema() map[string]any {
 	}
 }
 
-// Dispatch resolves a tool call. bash runs locally; anything else is forwarded
-// to the MCP registry (if the caller provides one).
-type MCPDispatcher interface {
-	Call(ctx context.Context, server, tool string, args map[string]any) (string, error)
-	Has(tool string) (server string, ok bool)
-}
-
 // Execute runs a tool call and returns the (possibly truncated) result ready
 // to be appended to the conversation as a `tool` message.
-func Execute(parent context.Context, call chmctx.ToolCall, disp MCPDispatcher) chmctx.Message {
-	raw := runRaw(parent, call, disp)
+func Execute(parent context.Context, call chmctx.ToolCall) chmctx.Message {
+	raw := runRaw(parent, call)
 	return chmctx.Message{
 		Role:       chmctx.RoleTool,
 		Content:    chmctx.Truncate(raw),
@@ -105,7 +98,7 @@ func Execute(parent context.Context, call chmctx.ToolCall, disp MCPDispatcher) c
 	}
 }
 
-func runRaw(parent context.Context, call chmctx.ToolCall, disp MCPDispatcher) string {
+func runRaw(parent context.Context, call chmctx.ToolCall) string {
 	switch call.Name {
 	case BashName:
 		cmd, _ := call.Arguments["cmd"].(string)
@@ -126,26 +119,7 @@ func runRaw(parent context.Context, call chmctx.ToolCall, disp MCPDispatcher) st
 		content, _ := call.Arguments["content"].(string)
 		return WriteFile(path, content)
 	default:
-		if disp == nil {
-			return fmt.Sprintf("(unknown tool: %s)", call.Name)
-		}
-		srv, ok := disp.Has(call.Name)
-		if !ok {
-			return fmt.Sprintf("(unknown tool: %s)", call.Name)
-		}
-		out, err := disp.Call(parent, srv, call.Name, call.Arguments)
-		if err != nil {
-			// MCP servers carry the actual diagnostic in the response
-			// content array even when isError=true; dropping it leaves
-			// the model with a useless "(tool error: tool reported error)"
-			// and no idea what to react to. Append the body when the
-			// dispatcher returned one alongside the error.
-			if out != "" {
-				return fmt.Sprintf("(tool error: %v)\n%s", err, out)
-			}
-			return fmt.Sprintf("(tool error: %v)", err)
-		}
-		return out
+		return fmt.Sprintf("(unknown tool: %s)", call.Name)
 	}
 }
 

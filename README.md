@@ -11,7 +11,7 @@ tool call has to earn its place. codehamr picks simplicity over
 complexity, on purpose. The agent stays small so the context window
 stays yours.
 
-Four slash commands, one embedded system prompt, no router, no sub
+Three slash commands, one embedded system prompt, no router, no sub
 agents, no skill system. That's it.
 
 ## Install
@@ -37,9 +37,9 @@ Then run `codehamr` in your project.
 ## Config
 
 On first run codehamr creates `.codehamr/config.yaml` for your
-profiles and MCP servers. The system prompt is embedded in the
-binary, not on disk. Project specific rules go straight into the
-chat: tell the agent what matters, the conversation carries it.
+profiles. The system prompt is embedded in the binary, not on disk.
+Project specific rules go straight into the chat: tell the agent
+what matters, the conversation carries it.
 
 ```yaml
 # .codehamr/config.yaml

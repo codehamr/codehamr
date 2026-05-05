@@ -69,14 +69,6 @@ var managedProfiles = map[string]Profile{
 	},
 }
 
-type MCPServer struct {
-	Command     string            `yaml:"command"`
-	Args        []string          `yaml:"args,omitempty"`
-	Env         map[string]string `yaml:"env,omitempty"`
-	Enabled     bool              `yaml:"enabled"`
-	Description string            `yaml:"description,omitempty"`
-}
-
 // Profile is one named model endpoint in config.yaml. Users can have any
 // number; `/models` switches between them. ContextSize is omitempty so
 // cloud profiles (server-managed window via X-Context-Window) leave the
@@ -93,9 +85,8 @@ type Profile struct {
 // keys cause Bootstrap to fail (strict YAML decoding) so typos and stale
 // schemas surface immediately rather than being silently ignored.
 type Config struct {
-	Active     string               `yaml:"active"`
-	Models     map[string]*Profile  `yaml:"models"`
-	MCPServers map[string]MCPServer `yaml:"mcp_servers,omitempty"`
+	Active string              `yaml:"active"`
+	Models map[string]*Profile `yaml:"models"`
 	// Logging, when true, writes a fresh .codehamr/log.txt on every start
 	// and appends every chat exchange to it. Debug instrumentation —
 	// removable by deleting this field, internal/tui/debuglog.go, and the
@@ -118,14 +109,6 @@ func Default() *Config {
 	return &Config{
 		Active: "local",
 		Models: models,
-		MCPServers: map[string]MCPServer{
-			"context7": {
-				Command:     "npx",
-				Args:        []string{"-y", "@upstash/context7-mcp@latest"},
-				Enabled:     true,
-				Description: "Documentation lookup",
-			},
-		},
 	}
 }
 
@@ -253,13 +236,6 @@ func (c *Config) ActiveURL() string {
 // popover cycles deterministically regardless of Go's map iteration order.
 func (c *Config) ModelNames() []string {
 	return slices.Sorted(maps.Keys(c.Models))
-}
-
-// MCPServerNames returns enabled+disabled MCP server names in sorted order.
-// Same rationale as ModelNames — callers that iterate for display need a
-// deterministic order.
-func (c *Config) MCPServerNames() []string {
-	return slices.Sorted(maps.Keys(c.MCPServers))
 }
 
 // SetActive switches the active profile and persists. Fails if name is

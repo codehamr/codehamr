@@ -195,10 +195,9 @@ func (m Model) handleEscInPopover() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleEnter implements the four way Enter dispatch. Alt+Enter inserts a
+// handleEnter implements the three way Enter dispatch. Alt+Enter inserts a
 // newline; otherwise the popover state decides: command level on an args
 // taking command advances to the arg popover (same mental model as Tab);
-// keepOpen arg level runs the handler in place and restores the arg popover;
 // plain Enter commits. Factored out of handleKey because this one branch
 // carries more state interaction than the other keys combined.
 func (m Model) handleEnter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -215,20 +214,6 @@ func (m Model) handleEnter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if c := commandByName(sel.value); c != nil && c.args != nil {
 			m.setPromptText(sel.value + " ")
 			return m, nil
-		}
-	}
-	// Arg-level Enter on a keepOpen command: run the handler in place and
-	// restore the arg popover so the user can chain toggles. The popover
-	// is re-seeded with the just-confirmed value as preferred so the
-	// cursor stays on that row across refreshes.
-	if hasSel && m.suggestArgLevel {
-		if c := commandByName(m.activeCmd); c != nil && c.keepOpen {
-			next, cmd := c.handler(m, []string{sel.value})
-			nm := next.(Model)
-			nm.ta.SetValue(c.name + " ")
-			nm.ta.CursorEnd()
-			nm.refreshSuggest(sel.value)
-			return nm, cmd
 		}
 	}
 	// Plain commit. Value() expands chip labels back to full paste content
