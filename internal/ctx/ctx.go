@@ -47,12 +47,23 @@ func (m Message) Tokens() int {
 }
 
 const (
-	ToolOutputCap   = 6000
-	ToolHeadTail    = 2000
-	FixedSystem     = 3000
-	FixedTools      = 1500
-	ResponseReserve = 8000
+	ToolOutputCap = 6000
+	ToolHeadTail  = 2000
+	FixedSystem   = 3000
+	FixedTools    = 1500
 )
+
+// ResponseReserve is the slice of the context window Budget keeps free for
+// the model's response. Scales as ctxSize/8 so big-context reasoning models
+// get adequate room: at 262k that's 32k — exactly the Qwen3-class
+// thinking-mode default — at 1M it's 125k. Floored at 8k so 32k/64k-class
+// profiles keep the legacy reserve and don't collapse history to nothing.
+func ResponseReserve(ctxSize int) int {
+	if r := ctxSize / 8; r > 8000 {
+		return r
+	}
+	return 8000
+}
 
 // Truncate collapses oversized tool outputs to first 2k + last 2k tokens.
 // Inputs at or under 6k tokens pass through unchanged. The 8k/8k byte
@@ -158,7 +169,7 @@ func dropOrphanTools(kept []Message) []Message {
 
 // Budget subtracts the fixed reservations from the total context size.
 func Budget(ctxSize int) int {
-	b := ctxSize - FixedSystem - FixedTools - ResponseReserve
+	b := ctxSize - FixedSystem - FixedTools - ResponseReserve(ctxSize)
 	if b < 0 {
 		return 0
 	}

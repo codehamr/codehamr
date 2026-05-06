@@ -133,10 +133,37 @@ func TestPackKeepsPairedToolMessage(t *testing.T) {
 }
 
 func TestBudget(t *testing.T) {
-	if got := Budget(65536); got != 65536-3000-1500-8000 {
-		t.Fatalf("budget wrong: %d", got)
+	// 65k: ctxSize/8 = 8192, just above the 8k floor.
+	if got := Budget(65536); got != 65536-3000-1500-8192 {
+		t.Fatalf("budget wrong at 65k: %d", got)
+	}
+	// 262k: ctxSize/8 = 32768, matches Qwen3 thinking-mode default.
+	if got := Budget(262144); got != 262144-3000-1500-32768 {
+		t.Fatalf("budget wrong at 262k: %d", got)
 	}
 	if Budget(1000) != 0 {
 		t.Fatal("budget must floor at 0")
+	}
+}
+
+// TestResponseReserveScales pins the reserve curve: floor active until
+// ctxSize/8 crosses 8k, then linear. Spot checks the values referenced
+// in the docstring so a future "let's tweak the divisor" lands here loud.
+func TestResponseReserveScales(t *testing.T) {
+	cases := []struct {
+		ctxSize int
+		want    int
+	}{
+		{32_768, 8000},     // floor — ctxSize/8 = 4096 < 8000
+		{64_000, 8000},     // floor — ctxSize/8 = 8000, not >
+		{65_536, 8192},     // just above the floor
+		{128_000, 16_000},  // linear
+		{262_144, 32_768},  // Qwen3 thinking-mode default
+		{1_000_000, 125_000},
+	}
+	for _, c := range cases {
+		if got := ResponseReserve(c.ctxSize); got != c.want {
+			t.Errorf("ResponseReserve(%d) = %d, want %d", c.ctxSize, got, c.want)
+		}
 	}
 }
