@@ -201,6 +201,8 @@ Result schema is `[{title, href, body}, ...]`. The `<<'PY'` heredoc with quoted 
 
 Avoid the bare `ddgs text -q ... -o json` CLI form — it writes timestamped files into the current directory, which pollutes the workspace.
 
+**For library/API docs**, add `site:<official-domain>` to the query (e.g. `site:react.dev`, `site:pkg.go.dev`, `site:docs.python.org`, `site:developer.mozilla.org`) — lands on upstream docs, skips blogspam and SEO-farmed copies.
+
 **Read a hit:** `curl -sL <url>` for raw HTML, pipe through `sed 's/<[^>]*>//g' | tr -s '[:space:]' ' '` for a quick text dump. For clean Markdown of a single page, `curl -sL https://r.jina.ai/<url>` works without a key (~20 RPM, fine for one-off lookups).
 
 **Failure paths:**
