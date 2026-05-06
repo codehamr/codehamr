@@ -78,7 +78,7 @@ models:
 ## Other tools in this space
 
 If you want plugins, sub agents and configure every detail on your own,
-[opencode](https://github.com/sst/opencode) and
+[opencode](https://github.com/anomalyco/opencode) and
 [pi-coding-agent](https://github.com/badlogic/pi-mono) are excellent.
 Claude Code and Codex are the polished commercial options.
 
