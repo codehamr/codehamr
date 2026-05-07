@@ -295,6 +295,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		first := !m.splashShown
+		// Width narrowing is the one resize axis that breaks bubbletea's
+		// inline-mode rendering: see the hardening note below. Widening,
+		// height-only changes, and same-size redundant events are all
+		// handled correctly by bubbletea's own repaint and don't earn
+		// the UX cost of a viewport clear.
+		widthShrunk := m.width > 0 && msg.Width < m.width
 		m.width, m.height = msg.Width, msg.Height
 		m.ta.SetWidth(msg.Width - 2)
 		// Glamour wraps a few cells inside the terminal width so long
@@ -307,13 +313,34 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if first {
 			// Print the splash exactly once, on the first size message,
 			// so it lands in scrollback above the live prompt and scrolls
-			// away naturally as content arrives.
+			// away naturally as content arrives. No clear on first — the
+			// terminal still belongs to the user's shell at this point.
 			m.splashShown = true
 			for _, line := range m.splashLines() {
 				m.outbox = append(m.outbox, line)
 			}
+			return m, nil
 		}
-		return m, nil
+		if !widthShrunk {
+			return m, nil
+		}
+		// Width-narrowing hardening. Any line in the previous frame that
+		// was ~m.width chars (divider, popover rows, ansi.Wrap'd
+		// streaming) soft-wraps in the terminal when m.width shrinks.
+		// Bubbletea's `cursor up linesRendered-1` math is logical-line
+		// based, so the visual overshoot orphans the old frame's top
+		// rows above the new frame — and bubbletea only emits
+		// EraseScreenBelow (never above), so without intervention those
+		// orphans persist render after render and the prompt appears to
+		// drift upward indefinitely. flushStreaming pushes any in-flight
+		// preview into terminal scrollback (where the terminal owns
+		// wrap on resize), shrinking the live region to chrome;
+		// tea.ClearScreen then homes the cursor and erases the visible
+		// viewport, re-anchoring bubbletea's renderer to a clean (0,0).
+		// ESC[2J leaves scrollback intact so the user can scroll up for
+		// prior context.
+		m.flushStreaming()
+		return m, tea.ClearScreen
 
 	case pingMsg:
 		m.connected = msg.ok

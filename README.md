@@ -68,9 +68,9 @@ models:
 
 ## Hardware
 
-codehamr is tuned for the **~27B LLM class**. We clearly recommend **qwen3.6:27b** or similar at 128k context, which needs **32 GB+ unified memory or VRAM**. Ollama desktop users must lift "Context length" in the app settings themselves, otherwise it caps at 4k silently.
+codehamr is tuned for the **~27B LLM class**, like **qwen3.6:27b** at 128k context, which needs **32 GB+ unified memory or VRAM**. Ollama desktop users must lift "Context length" in the app settings themselves, otherwise it caps at 4k silently.
 
-Bare minimum fallback: the **~9B LLM class**. We clearly recommend **qwen3.5:9b** at 64k on **12 GB+ unified memory or VRAM**. Quality drops noticeably with weaker reasoning, more verify retries, and more loop slips. If neither tier fits your machine, give the optional HamrPass a try, or use your own OpenAI API key.
+Bare minimum fallback: the **~9B LLM class**, like **qwen3.5:9b** at 64k on **12 GB+ unified memory or VRAM**. Quality drops noticeably with weaker reasoning, more verify retries, and more loop slips. If neither tier fits your machine, give the optional HamrPass a try, or use your own OpenAI API key.
 
 ## Compare
 
@@ -94,8 +94,8 @@ benchmarking the latest open weight model and tuning every
 parameter. We do that work and ship it as one endpoint with sensible
 defaults, so you can just hamr code and get your shit done.
 
-Right now HamrPass is waitlist only at [codehamr.com](https://codehamr.com).
+There's a waitlist at [codehamr.com](https://codehamr.com). HamrPass only gets built if real demand shows up there. Otherwise it doesn't. Local-first stays the focus.
 
 ## License
 
-[MIT](LICENSE). Do whatever you want with it.
+[MIT](LICENSE). Do whatever you want with it. Star it if it earned one.
