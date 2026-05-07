@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
@@ -20,14 +22,11 @@ import (
 	"github.com/codehamr/codehamr/internal/tools"
 )
 
-// Defaults used before the terminal reports its size via WindowSizeMsg.
-// Chosen to keep the first frame legible rather than a collapsed 0×0.
 const (
-	defaultWidth  = 80
-	defaultHeight = 24
-	minViewport   = 5 // breathing room reserved above the prompt for streaming tokens
-	popoverCap    = 6 // max rows the popover may claim
-	pingTimeout   = 2 * time.Second
+	defaultWidth = 80              // bootstrap width before the first WindowSizeMsg
+	minViewport  = 5               // breathing room reserved above the prompt for streaming tokens
+	popoverCap   = 6               // max rows the popover may claim
+	pingTimeout  = 2 * time.Second // backend reachability probe budget
 )
 
 // phase is the turn state machine. Idle = no turn; thinking = waiting on the
@@ -115,10 +114,15 @@ type Model struct {
 	width     int
 	height    int
 
-	// splashShown is flipped on the first WindowSizeMsg so the splash is
-	// printed exactly once into terminal scrollback at startup. From then
-	// on the splash scrolls up naturally as the conversation grows — no
-	// in-app "splash hides on first content" branch to maintain.
+	// View() returns "" while suppressView is on, so the bubbletea
+	// renderer's async ticker can't commit a stale frame mid-drag.
+	suppressView bool
+	// resizeGen is bumped per width change; settle ticks act only on
+	// the matching gen so older debounces self-discard.
+	resizeGen int
+
+	// splashShown guards the first-frame emission; later resizes
+	// re-emit via the settle handler.
 	splashShown bool
 
 	// arrow-key history: every successful submit is appended; histIdx tracks
@@ -227,6 +231,20 @@ func (m *Model) activeContextSize() int {
 // arrives — which is the very next response.
 const defaultPackFallback = 65536
 
+// resizeSettleDelay debounces width-resize bursts; longer than typical
+// drag SIGWINCH cadence (10–50ms) so a continuous drag collapses to one
+// settle, short enough that a one-off resize feels instant.
+const resizeSettleDelay = 150 * time.Millisecond
+
+type resizeSettleMsg struct{ gen int }
+
+// eraseScrollback wipes the terminal's saved-lines buffer (DECSED 3).
+// No tea.ClearScreen equivalent — only this clears scrollback.
+var eraseScrollback tea.Cmd = func() tea.Msg {
+	os.Stdout.WriteString(ansi.EraseDisplay(3))
+	return nil
+}
+
 // pingMsg carries the result of a backend-reachability probe.
 type pingMsg struct{ ok bool }
 
@@ -295,52 +313,56 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		first := !m.splashShown
-		// Width narrowing is the one resize axis that breaks bubbletea's
-		// inline-mode rendering: see the hardening note below. Widening,
-		// height-only changes, and same-size redundant events are all
-		// handled correctly by bubbletea's own repaint and don't earn
-		// the UX cost of a viewport clear.
-		widthShrunk := m.width > 0 && msg.Width < m.width
+		widthChanged := m.width > 0 && m.width != msg.Width
 		m.width, m.height = msg.Width, msg.Height
 		m.ta.SetWidth(msg.Width - 2)
-		// Glamour wraps a few cells inside the terminal width so long
-		// lines have breathing room when they land in scrollback.
-		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"),
-			glamour.WithWordWrap(max(msg.Width-4, 1))); err == nil {
-			m.renderer = r
+		if first || widthChanged {
+			// Glamour compiles a syntax stylesheet + template tree per
+			// build, so only rebuild when the wrap width actually
+			// changes — height-only events and intra-drag duplicates
+			// keep reusing the existing renderer.
+			if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"),
+				glamour.WithWordWrap(max(msg.Width-4, 1))); err == nil {
+				m.renderer = r
+			}
 		}
 		m.recomputeLayout()
 		if first {
-			// Print the splash exactly once, on the first size message,
-			// so it lands in scrollback above the live prompt and scrolls
-			// away naturally as content arrives. No clear on first — the
-			// terminal still belongs to the user's shell at this point.
 			m.splashShown = true
-			for _, line := range m.splashLines() {
-				m.outbox = append(m.outbox, line)
-			}
+			m.outbox = append(m.outbox, m.splashLines()...)
 			return m, nil
 		}
-		if !widthShrunk {
+		if !widthChanged {
 			return m, nil
 		}
-		// Width-narrowing hardening. Any line in the previous frame that
-		// was ~m.width chars (divider, popover rows, ansi.Wrap'd
-		// streaming) soft-wraps in the terminal when m.width shrinks.
-		// Bubbletea's `cursor up linesRendered-1` math is logical-line
-		// based, so the visual overshoot orphans the old frame's top
-		// rows above the new frame — and bubbletea only emits
-		// EraseScreenBelow (never above), so without intervention those
-		// orphans persist render after render and the prompt appears to
-		// drift upward indefinitely. flushStreaming pushes any in-flight
-		// preview into terminal scrollback (where the terminal owns
-		// wrap on resize), shrinking the live region to chrome;
-		// tea.ClearScreen then homes the cursor and erases the visible
-		// viewport, re-anchoring bubbletea's renderer to a clean (0,0).
-		// ESC[2J leaves scrollback intact so the user can scroll up for
-		// prior context.
-		m.flushStreaming()
-		return m, tea.ClearScreen
+		m.suppressView = true
+		m.resizeGen++
+		gen := m.resizeGen
+		return m, tea.Tick(resizeSettleDelay, func(time.Time) tea.Msg {
+			return resizeSettleMsg{gen: gen}
+		})
+
+	case resizeSettleMsg:
+		if msg.gen != m.resizeGen {
+			return m, nil
+		}
+		m.suppressView = false
+		// tea.Sequence keeps order strict — Batch would race the
+		// clears with the writes. After the wipe every line below was
+		// emitted at the current width, so no previous-width row can
+		// soft-wrap into stair-steps.
+		cmds := []tea.Cmd{tea.ClearScreen, eraseScrollback}
+		if splash := strings.Join(m.splashLines(), "\n"); splash != "" {
+			cmds = append(cmds, tea.Println(splash))
+		}
+		if scroll := strings.TrimRight(m.scroll.String(), "\n"); scroll != "" {
+			cmds = append(cmds, tea.Println(scroll))
+		}
+		if len(m.outbox) > 0 {
+			cmds = append(cmds, tea.Println(strings.Join(m.outbox, "\n")))
+			m.outbox = nil
+		}
+		return m, tea.Sequence(cmds...)
 
 	case pingMsg:
 		m.connected = msg.ok

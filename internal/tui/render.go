@@ -163,9 +163,11 @@ func wrapRows(s string, width int) int {
 // the user scrolls it with their terminal's own wheel/PgUp, exactly like
 // any other shell session.
 func (m Model) View() string {
-	if m.width == 0 {
-		// No WindowSizeMsg yet — render an empty frame rather than a
-		// collapsed zero width layout that would flash garbled output.
+	if m.width == 0 || m.suppressView {
+		// No WindowSizeMsg yet, or a width-resize is mid-drag. Either
+		// way an empty frame is the safe answer — a collapsed 0-wide
+		// layout flashes garbled, and a real frame mid-drag races the
+		// renderer's stale-flush window.
 		return ""
 	}
 	var pieces []string
@@ -183,26 +185,37 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, pieces...)
 }
 
-// splashLines builds the fresh-session identity block: the ASCII wordmark
-// in accent orange, a dim version/profile line, and a dim AI safety
-// notice. Returned as discrete lines so the caller can hand each to
-// tea.Println — the splash lands once in scrollback and scrolls up
-// naturally as the conversation grows.
+// splashLines builds the identity block for tea.Println. Below
+// wordmarkWidth the ASCII art soft-wraps into garbage, so collapse to
+// plain text rather than picking a middle variant — simpler is more
+// robust here.
 func (m Model) splashLines() []string {
-	lines := []string{""}
-	for i := range splashCode {
-		lines = append(lines, "  "+styleDim.Render(splashCode[i])+styleHamr.Render(splashHamr[i]))
+	const wordmarkWidth = 70 // cells needed for CODE+HAMR side-by-side
+	if m.width >= wordmarkWidth {
+		lines := []string{""}
+		for i := range splashCode {
+			lines = append(lines, "  "+styleDim.Render(splashCode[i])+styleHamr.Render(splashHamr[i]))
+		}
+		lines = append(lines,
+			"", styleDim.Render("  it's hamr time!"),
+			"", styleDim.Render(fmt.Sprintf("  codehamr %s · %s @ %s",
+				m.Version, m.cfg.ActiveProfile().LLM, m.cfg.Active)),
+			"",
+			styleDim.Render("  AI systems can make mistakes. Codehamr executes their commands with full shell and filesystem access."),
+			styleDim.Render("  Run inside a devcontainer or VM where it cannot cause damage outside the sandbox."),
+			"",
+		)
+		return lines
 	}
-	lines = append(lines, "", styleDim.Render("  it's hamr time!"))
-	lines = append(lines, "", styleDim.Render(fmt.Sprintf("  codehamr %s · %s @ %s",
-		m.Version, m.cfg.ActiveProfile().LLM, m.cfg.Active)))
-	lines = append(lines,
+	return []string{
 		"",
-		styleDim.Render("  AI systems can make mistakes. Codehamr executes their commands with full shell and filesystem access."),
-		styleDim.Render("  Run inside a devcontainer or VM where it cannot cause damage outside the sandbox."),
+		styleHamr.Render("  codehamr"),
+		styleDim.Render(fmt.Sprintf("  %s · %s @ %s",
+			m.Version, m.cfg.ActiveProfile().LLM, m.cfg.Active)),
 		"",
-	)
-	return lines
+		styleDim.Render("  Sandboxed AI shell — run in a devcontainer or VM."),
+		"",
+	}
 }
 
 func (m Model) renderStatusBar() string {

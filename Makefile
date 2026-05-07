@@ -18,9 +18,12 @@ build:
 	        -o bin/$(BINARY)-$$label-$$arch$$ext $(PKG); \
 	done
 
-run:
+run: build
 	clear
-	go run $(PKG)
+	@os=$$(go env GOOS); arch=$$(go env GOARCH); \
+	 label=$$os; [ "$$os" = "darwin" ] && label=macos; \
+	 ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+	 ./bin/$(BINARY)-$$label-$$arch$$ext
 
 install:
 	clear

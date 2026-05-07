@@ -56,36 +56,119 @@ func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 	}
 }
 
-// TestSubsequentResizeFlushesAndClears: every subsequent resize is the
-// hardening path. Any in-flight streaming preview must be drained into
-// terminal scrollback (so the live region shrinks to chrome and old wide
-// lines can no longer haunt the next frame), and tea.ClearScreen must be
-// returned so bubbletea's renderer re-anchors at (0,0). Without both,
-// soft-wrapped fragments of the previous frame stay orphaned above the
-// prompt and the cursor-up math drifts on every render.
-func TestSubsequentResizeFlushesAndClears(t *testing.T) {
+// TestWidthChangeSuppressesView: any width change (narrow OR widen)
+// flips suppressView so the renderer's async ticker has nothing to
+// commit between SIGWINCH and the settle. View() must return "" while
+// suppressed; bubbletea's renderer expands that into one blank row +
+// EraseScreenBelow, leaving nothing for soft-wrap reflow to orphan.
+// Streaming buffer is preserved (re-wrapped on resume).
+func TestWidthChangeSuppressesView(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
-	// First resize seeds the splash and is exempt from the hardening.
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	// Inject in-flight streaming content: this is what the user would see
-	// rendered live above the prompt mid-turn.
 	mx := mm.(Model)
 	mx.streaming.WriteString("partial reply line one\nline two\nline three\n")
 	mx.phase = phaseStreaming
 	mm = mx
 
-	mm2, cmd := mm.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
-	nm := mm2.(Model)
+	for _, next := range []int{60, 100} { // narrow then widen — both must suppress
+		mm2, cmd := mm.Update(tea.WindowSizeMsg{Width: next, Height: 24})
+		nm := mm2.(Model)
 
-	if nm.streaming.Len() != 0 {
-		t.Errorf("streaming buffer should be empty after resize, got %d bytes", nm.streaming.Len())
+		if !nm.suppressView {
+			t.Errorf("width change to %d must enable suppressView", next)
+		}
+		if got := nm.View(); got != "" {
+			t.Errorf("View() must return \"\" while suppressed (width=%d), got %q", next, got)
+		}
+		if nm.streaming.Len() == 0 {
+			t.Errorf("streaming buffer must survive width change to %d", next)
+		}
+		if cmd == nil {
+			t.Errorf("width change to %d must schedule a settle tick, got nil cmd", next)
+		}
+		mm = nm
 	}
-	if !cmdYieldsClearScreen(cmd) {
-		t.Error("subsequent WindowSizeMsg must return tea.ClearScreen")
+}
+
+// TestResizeSettleReplaysScrollbackAtNewWidth: when the settle tick
+// matches, the model returns a strict tea.Sequence that wipes both
+// viewport and scrollback, re-emits the splash at the new width, and
+// replays the entire m.scroll transcript. After this every line in
+// scrollback was emitted at the current width — no previous-width
+// rows soft-wrap into stair-steps, and the splash always matches the
+// terminal layout.
+func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
+	cfg, _, _ := config.Bootstrap(t.TempDir())
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	var mm tea.Model = m
+
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	// Seed some history into m.scroll so the settle has something to
+	// replay (mimics an earlier user submit + assistant response).
+	mx := mm.(Model)
+	mx.scroll.WriteString("▌ erkläre kurz bitcoin\nBitcoin ist eine digitale Währung.\n")
+	mm = mx
+
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	nm := mm.(Model)
+	if !nm.suppressView {
+		t.Fatal("setup precondition: suppressView must be true after width change")
+	}
+
+	mm2, settle := nm.Update(resizeSettleMsg{gen: nm.resizeGen})
+	nm2 := mm2.(Model)
+
+	if nm2.suppressView {
+		t.Error("matching settle must flip suppressView back to false")
+	}
+	if !cmdYieldsClearScreen(settle) {
+		t.Error("settle must include tea.ClearScreen")
+	}
+	if !cmdYieldsScrollbackErase(settle) {
+		t.Error("settle must include eraseScrollback (\\x1b[3J)")
+	}
+	if !cmdYieldsPrintln(settle) {
+		t.Error("settle must include at least one tea.Println — the splash and/or replayed scroll")
+	}
+	// Exactly two Println leaves: one for the splash, one for the
+	// transcript replay. (No outbox content was queued in this test.)
+	if n := countPrintlnLeaves(settle); n != 2 {
+		t.Errorf("expected 2 tea.Println leaves (splash + scroll replay), got %d", n)
+	}
+}
+
+// TestStaleResizeSettleIsDiscarded: a settle msg whose gen no longer
+// matches m.resizeGen (because a newer resize bumped it after the tick
+// was scheduled) must be a complete no-op. Otherwise the chrome would
+// flicker back during a slow drag the moment the first tick fires,
+// then disappear again on the next narrowing.
+func TestStaleResizeSettleIsDiscarded(t *testing.T) {
+	cfg, _, _ := config.Bootstrap(t.TempDir())
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	var mm tea.Model = m
+
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 60, Height: 30})
+	nm := mm.(Model)
+
+	if nm.resizeGen < 2 {
+		t.Fatalf("setup precondition: resizeGen must be >= 2 after two narrowings, got %d", nm.resizeGen)
+	}
+
+	stale := resizeSettleMsg{gen: nm.resizeGen - 1}
+	mm2, cmd := nm.Update(stale)
+	nm2 := mm2.(Model)
+
+	if !nm2.suppressView {
+		t.Error("stale settle must NOT flip suppressView off")
+	}
+	if cmd != nil {
+		t.Error("stale settle must return nil cmd (no clear, no further work)")
 	}
 }
 
@@ -105,21 +188,25 @@ func TestRedundantResizeIsNoOp(t *testing.T) {
 	}
 }
 
-// TestWidenResizeDoesNotClear: when the terminal grows wider, lines from
-// the previous frame (which were ≤ old width) all fit inside the new
-// width — no soft-wrap, no cursor drift, no orphans. Bubbletea's own
-// repaint handles the fresh draw correctly, so the hardening path must
-// stay out of it. Otherwise the user would lose recent scrollback context
-// every time they widen their window, which is actively user-hostile.
-func TestWidenResizeDoesNotClear(t *testing.T) {
+// TestWidenResizeAlsoSuppresses: widening changes the splash layout
+// (text→art at the wordmark threshold) and may leave previous-narrow
+// rows looking out of place at the new width, so the same suppress +
+// settle replay path used for narrowing applies. The immediate cmd
+// is the debounce tick — the actual clear lands on settle.
+func TestWidenResizeAlsoSuppresses(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
-	_, cmd := mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	if cmdYieldsClearScreen(cmd) {
-		t.Error("widening resize must not request ClearScreen")
+	mm, cmd := mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	nm := mm.(Model)
+
+	if !nm.suppressView {
+		t.Error("widening must enable suppressView so the eventual settle cleanly replays the new layout")
+	}
+	if cmd == nil {
+		t.Error("widening must schedule a settle tick")
 	}
 }
 
@@ -139,29 +226,54 @@ func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 	}
 }
 
-// cmdYieldsClearScreen reports whether cmd (or any leaf of a tea.Batch)
-// produces the unexported clearScreenMsg that bubbletea's renderer reacts
-// to. We compare via reflect because the message type is unexported.
-func cmdYieldsClearScreen(cmd tea.Cmd) bool {
+// countCmdLeaves invokes cmd (and recurses into the []tea.Cmd payload
+// of tea.BatchMsg / tea.sequenceMsg, both unexported but slice-shaped)
+// and counts the leaves where match returns true. Used to assert
+// what a Sequence emits without importing bubbletea's internal types.
+func countCmdLeaves(cmd tea.Cmd, match func(tea.Cmd, tea.Msg) bool) int {
 	if cmd == nil {
-		return false
+		return 0
 	}
-	target := reflect.TypeOf(tea.ClearScreen())
 	msg := cmd()
-	if reflect.TypeOf(msg) == target {
-		return true
+	if match(cmd, msg) {
+		return 1
 	}
-	batch, ok := msg.(tea.BatchMsg)
-	if !ok {
-		return false
+	rv := reflect.ValueOf(msg)
+	if rv.Kind() != reflect.Slice {
+		return 0
 	}
-	for _, c := range batch {
-		if c == nil {
+	n := 0
+	for i := 0; i < rv.Len(); i++ {
+		c, ok := rv.Index(i).Interface().(tea.Cmd)
+		if !ok {
 			continue
 		}
-		if reflect.TypeOf(c()) == target {
-			return true
-		}
+		n += countCmdLeaves(c, match)
 	}
-	return false
+	return n
+}
+
+func cmdYieldsClearScreen(cmd tea.Cmd) bool {
+	target := reflect.TypeOf(tea.ClearScreen())
+	return countCmdLeaves(cmd, func(_ tea.Cmd, msg tea.Msg) bool {
+		return reflect.TypeOf(msg) == target
+	}) > 0
+}
+
+func cmdYieldsScrollbackErase(cmd tea.Cmd) bool {
+	needlePtr := reflect.ValueOf(eraseScrollback).Pointer()
+	return countCmdLeaves(cmd, func(c tea.Cmd, _ tea.Msg) bool {
+		return reflect.ValueOf(c).Pointer() == needlePtr
+	}) > 0
+}
+
+func cmdYieldsPrintln(cmd tea.Cmd) bool {
+	return countPrintlnLeaves(cmd) > 0
+}
+
+func countPrintlnLeaves(cmd tea.Cmd) int {
+	return countCmdLeaves(cmd, func(_ tea.Cmd, msg tea.Msg) bool {
+		t := reflect.TypeOf(msg)
+		return t != nil && t.Name() == "printLineMessage"
+	})
 }

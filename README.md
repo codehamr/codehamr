@@ -78,7 +78,7 @@ Bare minimum fallback: the **~9B LLM class**, like **qwen3.5:9b** at 64k on **12
 |---|---|
 | **Frontier** | you want commercial heavyweight polish from Claude Code or Codex and accept the subscription cost and session timeouts |
 | **[opencode](https://github.com/anomalyco/opencode)** | you want a great, loaded Swiss army knife and embrace plugin complexity |
-| **[pi-coding-agent](https://github.com/badlogic/pi-mono)** | you want something lighter than opencode and accept configuring your own extensions, skills, and themes |
+| **[pi-agent](https://github.com/badlogic/pi-mono)** | you want something lighter than opencode and accept configuring your own extensions, skills, and themes |
 | **codehamr** | you want the lightest take on simplicity over complexity and accept no plugins, skills, or sub-agents |
 
 ## HamrPass
