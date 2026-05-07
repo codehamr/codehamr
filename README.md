@@ -11,8 +11,8 @@ tool call has to earn its place. codehamr picks simplicity over
 complexity, on purpose. The agent stays small so the context window
 stays yours.
 
-Three slash commands, one embedded system prompt, no router, no sub
-agents, no skill system. That's it.
+Three slash commands, one embedded system prompt, no router, no
+sub-agents, no skill system, no MCP. That's it.
 
 The agent runs in one deterministic loop, internally called *GYSD*
 (Get Your Shit Done), where every turn ends with one of three tools:
@@ -68,15 +68,15 @@ models:
 
 ## Hardware
 
-codehamr is tuned for the ~30B LLM class. We clearly recommend **qwen3.6:27b** or similar at 128k context, which needs **32 GB+ unified memory or VRAM**. Ollama desktop users must lift "Context length" in the app settings themselves, otherwise it caps at 4k silently.
+codehamr is tuned for the **~27B LLM class**. We clearly recommend **qwen3.6:27b** or similar at 128k context, which needs **32 GB+ unified memory or VRAM**. Ollama desktop users must lift "Context length" in the app settings themselves, otherwise it caps at 4k silently.
 
-Bare minimum fallback: **qwen3.5:9b at 64k** on **12 GB+ unified memory or VRAM**. Quality drops noticeably (weaker reasoning, more verify retries, more loop slips). If neither tier fits your machine, the optional HamrPass might be worth a try, or use your own OpenAI API key.
+Bare minimum fallback: the **~9B LLM class**. We clearly recommend **qwen3.5:9b** at 64k on **12 GB+ unified memory or VRAM**. Quality drops noticeably with weaker reasoning, more verify retries, and more loop slips. If neither tier fits your machine, give the optional HamrPass a try, or use your own OpenAI API key.
 
 ## Compare
 
 | Tool | Pick if |
 |---|---|
-| **Frontier** | you want commercial heavyweight polish (Claude Code, Codex) and accept the subscription cost and session timeouts |
+| **Frontier** | you want commercial heavyweight polish from Claude Code or Codex and accept the subscription cost and session timeouts |
 | **[opencode](https://github.com/anomalyco/opencode)** | you want a great, loaded Swiss army knife and embrace plugin complexity |
 | **[pi-coding-agent](https://github.com/badlogic/pi-mono)** | you want something lighter than opencode and accept configuring your own extensions, skills, and themes |
 | **codehamr** | you want the lightest take on simplicity over complexity and accept no plugins, skills, or sub-agents |
