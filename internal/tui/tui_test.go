@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -2230,5 +2231,107 @@ func TestHamrpassRejectsMultipleArgs(t *testing.T) {
 	out := stripANSI(final.scroll.String())
 	if !strings.Contains(out, "cannot contain spaces") {
 		t.Fatalf("expected space-rejection error in scrollback:\n%s", out)
+	}
+}
+
+// TestMultiToolCallRoundExecutesAllBeforeNextChat: when the model emits
+// multiple tool calls in a single round, EVERY tool must execute and its
+// result be appended to history BEFORE the next chat round begins.
+// OpenAI rejects an `assistant.tool_calls` message followed by fewer
+// `tool` messages than calls issued — the mock server doesn't enforce
+// that, but the captured request body lets us assert both results land
+// before the round-2 dispatch. Without this guarantee, only the first
+// tool's output reaches round 2 and the rest are lost.
+func TestMultiToolCallRoundExecutesAllBeforeNextChat(t *testing.T) {
+	var roundBodies [][]byte
+	turn := 0
+	m := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		roundBodies = append(roundBodies, body)
+		turn++
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch turn {
+		case 1:
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"echo first\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"bash","arguments":"{\"cmd\":\"echo second\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		default:
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c3","function":{"name":"ask","arguments":"{\"question\":\"both finished?\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":1}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}
+	})
+	mm, cmd := m.submit("two echoes", "two echoes", promptEntry{display: "two echoes"})
+	out, _ := drain(mm, cmd)
+	final := out.(Model)
+
+	if turn != 2 {
+		t.Fatalf("expected exactly 2 LLM rounds, got %d", turn)
+	}
+	if !bytes.Contains(roundBodies[1], []byte("first")) {
+		t.Fatalf("round 2 request missing tool_result for first call:\n%s", roundBodies[1])
+	}
+	if !bytes.Contains(roundBodies[1], []byte("second")) {
+		t.Fatalf("round 2 request missing tool_result for second call:\n%s", roundBodies[1])
+	}
+	toolResults := 0
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleTool {
+			toolResults++
+		}
+	}
+	if toolResults != 2 {
+		t.Fatalf("expected 2 tool results in history, got %d:\n%+v", toolResults, final.history)
+	}
+	if len(final.pending) != 0 {
+		t.Fatalf("pending should be drained after the turn, got %d leftover calls", len(final.pending))
+	}
+}
+
+// TestEndTurnResetsPendingSoStaleCallsDoNotLeakIntoNextTurn: when an
+// assistant emits a loop tool BEFORE another tool call in the same round
+// ([ask, bash] etc.), the loop tool yields the turn — but bash sat
+// undispatched in m.pending. Without resetting pending in endTurn the
+// next user submission would pick up the stale call, dispatch it against
+// the new turn's context, and append a tool_result whose tool_call_id
+// points at the previous turn's assistant message — exactly the orphan
+// shape OpenAI rejects with 400.
+func TestEndTurnResetsPendingSoStaleCallsDoNotLeakIntoNextTurn(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.installTurnContext()
+	m.phase = phaseStreaming
+	m.pending = []chmctx.ToolCall{
+		{ID: "stale-c1", Name: "bash", Arguments: map[string]any{"cmd": "echo stale"}},
+	}
+	m.endTurn()
+	if len(m.pending) != 0 {
+		t.Fatalf("endTurn must drop pending tool calls, got %d leftover", len(m.pending))
+	}
+}
+
+// TestStaleProbeDoesNotPrintActivationBannerForNonActiveProfile: a probe
+// for a profile the user has /models'd away from in the meantime must not
+// print "✓ active: <profile>" — the banner is a lie at that point. The
+// existing TestStaleProbeForOldProfileDoesNotOverwriteConnectedFlag pinned
+// down the connection-state guard; this one pins down the banner guard so
+// both layers of staleness handling stay coupled.
+func TestStaleProbeDoesNotPrintActivationBannerForNonActiveProfile(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.cfg.Active = "local"
+
+	out, _ := m.handleProbe(probeMsg{profile: "hamrpass", contextWindow: 262144})
+	final := out.(Model)
+	if got := stripANSI(final.scroll.String()); strings.Contains(got, "✓ active: hamrpass") {
+		t.Fatalf("stale probe must not print activation banner for non-active profile:\n%s", got)
+	}
+
+	// Sanity: probe for the live profile DOES print the banner.
+	m2 := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m2.cfg.Active = "local"
+	out2, _ := m2.handleProbe(probeMsg{profile: "local", contextWindow: 131072})
+	final2 := out2.(Model)
+	if got := stripANSI(final2.scroll.String()); !strings.Contains(got, "✓ active: local") {
+		t.Fatalf("active-profile probe must print activation banner:\n%s", got)
 	}
 }

@@ -15,7 +15,7 @@ import (
 
 // Wire-format tool names. Centralised so the schema, the router switch, and
 // the inline-status switch can never drift apart. Mirrors the pattern in the
-// plan package (plan.ToolSubmitPlan etc.).
+// gysd package (gysd.ToolVerify etc.).
 const (
 	BashName      = "bash"
 	WriteFileName = "write_file"

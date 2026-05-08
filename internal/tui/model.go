@@ -374,6 +374,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		dbgWriteMessage("tool_result", msg.Msg)
 		m.history = append(m.history, msg.Msg)
+		// When the assistant emitted multiple tool calls in one round, drain
+		// the rest before re-entering chat. OpenAI rejects an
+		// `assistant.tool_calls` message followed by fewer `tool` messages
+		// than calls issued, so a partial dispatch produces a 400 from the
+		// server and loses the un-dispatched calls. Sequential dispatch in
+		// the order the model emitted them keeps the contract intact.
+		if len(m.pending) > 0 {
+			return m.dispatchNextTool()
+		}
 		m.phase = phaseThinking
 		return m, m.startChat()
 
@@ -505,7 +514,7 @@ func (m *Model) startChat() tea.Cmd {
 // fresh per-turn root on m.turnCtx / m.cancel. The cancel-old-then-
 // install-new pattern keeps Ctrl+C semantics consistent: one m.cancel()
 // call always unwinds the whole current cascade, whether it was started
-// by submit or a plan nudge.
+// by submit or a GYSD S4 nudge.
 func (m *Model) installTurnContext() {
 	if m.cancel != nil {
 		m.cancel()
@@ -526,7 +535,7 @@ func (m *Model) beginTurn() tea.Cmd {
 }
 
 // appendUserTurn appends a user-role message to history and starts a turn.
-// Used by submit and the plan-mode nudges that continue the conversation
+// Used by submit and the GYSD S4 nudge that continues the conversation
 // rather than reset it.
 func (m *Model) appendUserTurn(content string) tea.Cmd {
 	m.history = append(m.history, chmctx.Message{Role: chmctx.RoleUser, Content: content})
@@ -537,8 +546,13 @@ func (m *Model) appendUserTurn(content string) tea.Cmd {
 // Pair to beginTurn. Cancels the per-turn context unconditionally so the
 // CancelFunc is released — Background-rooted contexts otherwise leak the
 // child cancelCtx until the process exits, one per turn over a long
-// session. Does NOT touch pending or scrollback — callers decide whether a
-// cancelled turn still needs to flush streaming or emit a banner.
+// session. Drops any pending tool calls so a yield/end-loop that fires
+// before the queue drained ([ask, bash] etc.) cannot leak the leftover
+// call into the next turn — that would dispatch with stale args and
+// append an orphan tool_result whose tool_call_id no longer pairs with
+// the latest assistant message. Does NOT touch scrollback — callers
+// decide whether a cancelled turn still needs to flush streaming or
+// emit a banner.
 func (m *Model) endTurn() {
 	if m.cancel != nil {
 		m.cancel()
@@ -546,6 +560,7 @@ func (m *Model) endTurn() {
 	m.phase = phaseIdle
 	m.cancel = nil
 	m.turnCtx = nil
+	m.pending = nil
 }
 
 func (m *Model) buildMessages() []chmctx.Message {
@@ -570,7 +585,7 @@ func (m *Model) buildTools() []llm.Tool {
 }
 
 // schemaToTool unwraps a tool schema (the map[string]any shape shared by
-// bash + plan tools) into the typed llm.Tool the chat payload expects.
+// bash + GYSD loop tools) into the typed llm.Tool the chat payload expects.
 func schemaToTool(s map[string]any) llm.Tool {
 	fn := s["function"].(map[string]any)
 	return llm.Tool{

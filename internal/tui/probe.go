@@ -98,7 +98,12 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	if msg.contextWindow > 0 {
 		m.liveContextSize[msg.profile] = msg.contextWindow
 	}
-	if msg.silent {
+	// Suppress the activation banner for stale probes: a probe whose
+	// profile is no longer the active one (user /models'd away mid-flight)
+	// must not print "✓ active: <profile>" — the profile in the banner is
+	// not active. liveContextSize is still updated above so the value is
+	// ready next time the user switches back.
+	if msg.silent || !active {
 		return m, nil
 	}
 	suffix := ""
