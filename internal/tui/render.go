@@ -5,7 +5,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
@@ -175,12 +174,20 @@ func (m Model) View() string {
 	if p := m.renderPopover(); p != "" {
 		pieces = append(pieces, p)
 	}
+	// Divider one cell narrower than m.width, and pieces joined with bare
+	// "\n" instead of lipgloss.JoinVertical's Left-pad: any rendered line
+	// that ends exactly in the terminal's last column triggers Apple
+	// Terminal.app's last-column-wrap (DECAWM xn) inconsistently, which
+	// drifts bubbletea's inline-renderer line count by one per frame —
+	// visible as a duplicated prompt line that overwrites the status bar
+	// on macOS while xterm/Windows-Terminal/iTerm2 stay clean. Keeping the
+	// last column blank sidesteps the divergence on every rendered row.
 	pieces = append(pieces,
-		styleDim.Render(strings.Repeat("─", m.width)),
+		styleDim.Render(strings.Repeat("─", max(m.width-1, 1))),
 		m.ta.View(),
 		m.renderStatusBar(),
 	)
-	return lipgloss.JoinVertical(lipgloss.Left, pieces...)
+	return strings.Join(pieces, "\n")
 }
 
 // splashLines builds the identity block for tea.Println. Below
