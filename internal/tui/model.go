@@ -310,6 +310,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyRunes && len(msg.Runes) == 0 {
 			return m, nil
 		}
+		// Pre-grow the textarea before bubbles processes the key. bubbles'
+		// internal repositionView() runs at the end of textarea.Update and
+		// scrolls the viewport down whenever the cursor crosses below the
+		// current Height — but our recomputeLayout() that grows Height
+		// only runs AFTER handleKey returns. Result: typing a char that
+		// wraps to a new visual row leaves YOffset>0 with the first wrap
+		// row clipped off the top, and growing Height in recomputeLayout
+		// can't reclaim those hidden rows. By temporarily inflating Height
+		// to the screen-cap before the key reaches the textarea, the
+		// cursor stays inside the viewport's visible band for any normal
+		// keystroke, repositionView doesn't scroll, and YOffset stays at
+		// 0. recomputeLayout below then trims Height back to the actual
+		// visualPromptLines so the live region doesn't bloat empty rows.
+		m.preGrowTextarea()
 		next, cmd := m.handleKey(msg)
 		nm := next.(Model)
 		nm.recomputeLayout()
@@ -574,10 +588,11 @@ func (m *Model) buildTools() []llm.Tool {
 	out := []llm.Tool{}
 	out = append(out, schemaToTool(tools.BashSchema()))
 	out = append(out, schemaToTool(tools.WriteFileSchema()))
+	out = append(out, schemaToTool(tools.EditFileSchema()))
 	// GYSD loop tools (verify/done/ask) are always exposed alongside
-	// bash/write_file — one mode, no phase gating, no triage. The
-	// orchestrator enforces "every turn ends with one of these three"
-	// via the gysd Session, not via tool-availability tricks.
+	// the bash/write_file/edit_file trio — one mode, no phase gating,
+	// no triage. The orchestrator enforces "every turn ends with one
+	// of these three" via the gysd Session, not via tool-availability tricks.
 	for _, s := range gysd.LoopTools() {
 		out = append(out, schemaToTool(s))
 	}

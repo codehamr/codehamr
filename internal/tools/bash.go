@@ -19,6 +19,7 @@ import (
 const (
 	BashName      = "bash"
 	WriteFileName = "write_file"
+	EditFileName  = "edit_file"
 )
 
 // maxBashTimeoutSeconds caps the per-call timeout the model can request via
@@ -129,6 +130,11 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 		path, _ := call.Arguments["path"].(string)
 		content, _ := call.Arguments["content"].(string)
 		return WriteFile(path, content)
+	case EditFileName:
+		path, _ := call.Arguments["path"].(string)
+		oldString, _ := call.Arguments["old_string"].(string)
+		newString, _ := call.Arguments["new_string"].(string)
+		return EditFile(path, oldString, newString)
 	default:
 		return fmt.Sprintf("(unknown tool: %s)", call.Name)
 	}
@@ -143,6 +149,9 @@ func InlineStatus(call chmctx.ToolCall) string {
 	case WriteFileName:
 		path, _ := call.Arguments["path"].(string)
 		return "▶ write_file: " + path
+	case EditFileName:
+		path, _ := call.Arguments["path"].(string)
+		return "▶ edit_file: " + path
 	default:
 		// try to pluck a meaningful arg (first string value)
 		for _, v := range call.Arguments {

@@ -72,12 +72,37 @@ const chromeHeight = 2
 // minViewport rows of breathing room above the textarea". Cheap enough to
 // run on every key press.
 func (m *Model) recomputeLayout() {
-	pop := m.popoverHeight()
-	maxTA := 1
-	if m.height > 0 {
-		maxTA = max(1, m.height-minViewport-chromeHeight-pop)
+	m.ta.SetHeight(max(1, min(m.visualPromptLines(), m.maxTextareaHeight())))
+}
+
+// maxTextareaHeight is the vertical cap available to the textarea — the
+// terminal minus chrome, the streaming/chat breathing room, and any active
+// popover. Shared by recomputeLayout (the actual SetHeight call) and
+// preGrowTextarea (the pre-key inflation that keeps YOffset anchored).
+func (m *Model) maxTextareaHeight() int {
+	if m.height <= 0 {
+		return 1
 	}
-	m.ta.SetHeight(max(1, min(m.visualPromptLines(), maxTA)))
+	return max(1, m.height-minViewport-chromeHeight-m.popoverHeight())
+}
+
+// preGrowTextarea inflates the textarea's Height to the available cap
+// *before* a KeyMsg is processed. bubbles/textarea calls repositionView()
+// at the end of its Update — that scrolls the internal viewport down
+// whenever the cursor moves below the current Height (e.g. a typed char
+// wraps the line). Without this pre-grow, recomputeLayout (which runs
+// AFTER handleKey) sets the right Height for the new content but the
+// viewport stays anchored at the already-scrolled YOffset, hiding the
+// earliest wrap rows. By bumping Height up first, the cursor stays inside
+// the visible band for any normal keystroke and no scroll fires.
+// recomputeLayout right after handleKey shrinks Height back down to the
+// actual visualPromptLines, leaving YOffset at 0 and every wrapped row
+// visible from the top.
+func (m *Model) preGrowTextarea() {
+	cap := m.maxTextareaHeight()
+	if cap > m.ta.Height() {
+		m.ta.SetHeight(cap)
+	}
 }
 
 // visualPromptLines counts the *visual* rows the textarea needs, not the
