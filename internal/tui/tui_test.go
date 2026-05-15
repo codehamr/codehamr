@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,11 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 		t.Fatal(err)
 	}
 	cfg.ActiveProfile().URL = srv.URL
+	// Persist so the reload-on-slash path (runSlash → reloadConfigFromDisk)
+	// reads the test's mock URL back, not the seeded localhost default.
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	client := llm.New(srv.URL, cfg.ActiveProfile().LLM, "")
 	m := New(cfg, client, t.TempDir(), "test")
 	// give it a size so view() doesn't panic
@@ -453,6 +459,11 @@ func TestArgPopoverOpensForModels(t *testing.T) {
 	m.cfg.Models["remote"] = &config.Profile{
 		LLM: "gpt-5.1", URL: "http://r", Key: "sk-r", ContextSize: 200000,
 	}
+	// Persist so the popover's cmd→arg reload reads back the test setup
+	// instead of resetting to disk defaults.
+	if err := m.cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	mm := typeInto(m, "/models ")
 	if !mm.suggestArgLevel || mm.activeCmd != "/models" {
 		t.Fatalf("expected arg-level for /models: level=%v cmd=%q",
@@ -560,6 +571,9 @@ func TestSlashModelSwitchesActive(t *testing.T) {
 	m.cfg.Models["remote"] = &config.Profile{
 		LLM: "gpt-5.1", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
 	}
+	if err := m.cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	m2, _ := m.runSlash("/models remote")
 	final := m2.(Model)
 	if final.cfg.Active != "remote" {
@@ -638,6 +652,9 @@ func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	m.cfg.Models["remote"] = &config.Profile{
 		LLM: "gpt-5.1", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
 	}
+	if err := m.cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	before := m.cli
 	out, _ := m.runSlash("/models remote")
 	final := out.(Model)
@@ -692,6 +709,127 @@ func TestSlashClearResetsHistory(t *testing.T) {
 	m2, _ := m.runSlash("/clear")
 	if len(m2.(Model).history) != 0 {
 		t.Fatal("/clear must drop history")
+	}
+}
+
+// TestArgPopoverReloadsCfgOnEntry pins the regression for "external edit
+// shows up only on the second /models". The arg popover (cmd→arg
+// transition) builds its suggestion list from m.cfg.Models — without the
+// cmd→arg reload in refreshSuggest, the first typed "/models " sees the
+// stale in-memory cfg and never lists the hand-added profile. Submitting
+// runs runSlash's reload, which is why the SECOND attempt would show it.
+// Reload-at-popover-open closes this gap.
+func TestArgPopoverReloadsCfgOnEntry(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	// Hand-write a new "remote" profile directly to config.yaml — bypasses
+	// cfg.Save() entirely, simulating an external editor.
+	yaml := []byte(`active: local
+models:
+  local:
+    llm: qwen3.6:27b
+    url: ` + m.cfg.Models["local"].URL + `
+    key: ""
+    context_size: 131072
+  remote:
+    llm: gpt-5.1
+    url: http://remote:9000
+    key: sk-r
+    context_size: 200000
+`)
+	if err := os.WriteFile(filepath.Join(m.cfg.Dir, "config.yaml"), yaml, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.cfg.Models["remote"]; ok {
+		t.Fatal("precondition: in-memory cfg must not know about 'remote' yet")
+	}
+	mm := typeInto(m, "/models ")
+	names := suggestNames(mm)
+	if !slices.Contains(names, "remote") {
+		t.Fatalf("external 'remote' profile missing from arg popover on first /models entry, got %v", names)
+	}
+}
+
+// TestRunSlashPicksUpExternalConfigEdits: runSlash re-reads
+// .codehamr/config.yaml before dispatching, so a profile a user hand-added
+// to the file mid-session shows up on the next /models without a restart.
+func TestRunSlashPicksUpExternalConfigEdits(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	// Hand-write a fresh config that adds a "remote" profile alongside the
+	// seeded local. Bypasses cfg.Save() entirely — this is what the user
+	// would do in an external editor.
+	yaml := []byte(`active: local
+models:
+  local:
+    llm: qwen3.6:27b
+    url: ` + m.cfg.Models["local"].URL + `
+    key: ""
+    context_size: 131072
+  remote:
+    llm: gpt-5.1
+    url: http://remote:9000
+    key: sk-r
+    context_size: 200000
+`)
+	if err := os.WriteFile(filepath.Join(m.cfg.Dir, "config.yaml"), yaml, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.cfg.Models["remote"]; ok {
+		t.Fatal("precondition: in-memory cfg must not know about 'remote' yet")
+	}
+	out, _ := m.runSlash("/models")
+	final := out.(Model)
+	if _, ok := final.cfg.Models["remote"]; !ok {
+		t.Fatalf("external edit not picked up — Models keys: %v",
+			final.cfg.ModelNames())
+	}
+}
+
+// TestRunSlashWarnsOnBrokenConfig: a typo in config.yaml must not lock the
+// user out of slash commands. The reload prints a one-line warning and
+// keeps the previous in-memory cfg, so /models (and further editing) keep
+// working with last-known-good state.
+func TestRunSlashWarnsOnBrokenConfig(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	prevActive := m.cfg.Active
+	prevModels := len(m.cfg.Models)
+	if err := os.WriteFile(filepath.Join(m.cfg.Dir, "config.yaml"),
+		[]byte("active: [unterminated\nmodels: {{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := m.runSlash("/models")
+	final := out.(Model)
+	scroll := stripANSI(final.scroll.String())
+	if !strings.Contains(scroll, "config.yaml") {
+		t.Fatalf("scrollback should warn about broken config.yaml:\n%s", scroll)
+	}
+	if final.cfg.Active != prevActive {
+		t.Fatalf("broken-config reload must preserve previous Active, got %q want %q",
+			final.cfg.Active, prevActive)
+	}
+	if len(final.cfg.Models) != prevModels {
+		t.Fatalf("broken-config reload must preserve previous Models, got %d want %d",
+			len(final.cfg.Models), prevModels)
+	}
+}
+
+// TestSlashClearSurvivesBrokenConfig: even with config.yaml unparseable,
+// /clear must still wipe history. Reload's warning is wiped along with
+// the rest of the scrollback (clear-screen semantics override the warning
+// — that's fine, the user will see the warning the moment they touch any
+// non-/clear slash next), but the actual reset behaviour stays intact.
+func TestSlashClearSurvivesBrokenConfig(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.history = append(m.history,
+		chmctx.Message{Role: chmctx.RoleUser, Content: "hi"},
+		chmctx.Message{Role: chmctx.RoleAssistant, Content: "hey"},
+	)
+	if err := os.WriteFile(filepath.Join(m.cfg.Dir, "config.yaml"),
+		[]byte("active: [unterminated\nmodels: {{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := m.runSlash("/clear")
+	if len(out.(Model).history) != 0 {
+		t.Fatal("/clear must still drop history with broken config")
 	}
 }
 
@@ -2123,6 +2261,9 @@ func TestHamrpassNoArgsShowsExplainerWhenUnset(t *testing.T) {
 func TestHamrpassNoArgsShowsSetWhenKeyPresent(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.cfg.Models["hamrpass"].Key = "hp-already-1234567890abcdef"
+	if err := m.cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	m2, _ := m.runSlash("/hamrpass")
 	out := stripANSI(m2.(Model).scroll.String())
 	if !strings.Contains(out, "status   : set") {
@@ -2172,6 +2313,12 @@ func TestHamrpassSetsKeyAndActivates(t *testing.T) {
 func TestHamrpassLazyCreatesProfile(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	delete(m.cfg.Models, "hamrpass")
+	// Persist the deletion so runSlash's reload sees a hamrpass-less
+	// config — otherwise the on-disk seed slips back in and the EnsureHamrpass
+	// lazy-create path under test never fires.
+	if err := m.cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := m.cfg.Models["hamrpass"]; ok {
 		t.Fatal("precondition: hamrpass should be absent")
 	}

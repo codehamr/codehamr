@@ -59,6 +59,15 @@ func (m *Model) refreshSuggest(preferred string) {
 		m.closePopover()
 		return
 	}
+	// Refresh cfg from disk on the cmd→arg transition (or when switching
+	// between different commands at arg-level) so suggestion lists like
+	// /models <name> reflect external edits before the user submits. Silent
+	// on Bootstrap error — runSlash will surface the warning on actual
+	// submit, which avoids spamming a broken-config warning on every
+	// keystroke during slash typing.
+	if !m.suggestArgLevel || m.activeCmd != cmdName {
+		_ = m.reloadConfigFromDisk()
+	}
 	argPrefix := strings.TrimLeft(rest, " ")
 	var ms []argOption
 	for _, o := range c.args(*m) {

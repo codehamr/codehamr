@@ -3,12 +3,14 @@ package tui
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codehamr/codehamr/internal/cloud"
+	"github.com/codehamr/codehamr/internal/config"
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
@@ -85,14 +87,58 @@ func commandByName(name string) *command {
 }
 
 // runSlash dispatches a slash-prefixed submission. Unknown commands produce a
-// quiet hint, not an error.
+// quiet hint, not an error. config.yaml is re-read before every slash so
+// hand-edits (new profile, changed URL, deleted entry) take effect without
+// a restart — see reloadConfigFromDisk for the failure-handling contract.
+// refreshSuggest does an additional silent reload on the cmd→arg popover
+// transition so the live suggestion list (e.g. /models <name>) reflects
+// external edits even before the user submits.
 func (m Model) runSlash(text string) (tea.Model, tea.Cmd) {
+	if err := m.reloadConfigFromDisk(); err != nil {
+		m.appendLine(styleWarn.Render("⚠ " + err.Error()))
+	}
 	fields := strings.Fields(text)
 	if c := commandByName(fields[0]); c != nil {
 		return c.handler(m, fields[1:])
 	}
 	m.appendLine(styleWarn.Render("unknown command — type / to see options"))
 	return m, nil
+}
+
+// reloadConfigFromDisk re-runs config.Bootstrap and replaces m.cfg so any
+// hand-edits to .codehamr/config.yaml between slash commands are visible
+// immediately. Runtime-only fields (URLOverride from CODEHAMR_URL) are
+// carried over so the env var continues to apply after the swap.
+//
+// Returns the Bootstrap error verbatim — callers decide whether to surface
+// it (runSlash prints a warning line; the popover-refresh path ignores it
+// so a broken file doesn't spam a warning on every keystroke during slash
+// typing — runSlash will surface it when the user actually submits).
+//
+// When the resolved (URL, model, key) triple of the active profile has
+// changed since the last load, the live llm.Client is rebuilt so the next
+// chat dials the new endpoint. Within-profile field changes (URL/model/key
+// edited under the same active name) and across-profile changes (active
+// itself moved) both flow through the same comparison.
+func (m *Model) reloadConfigFromDisk() error {
+	projectRoot := filepath.Dir(m.cfg.Dir)
+	fresh, _, err := config.Bootstrap(projectRoot)
+	if err != nil {
+		return err
+	}
+	fresh.URLOverride = m.cfg.URLOverride
+
+	prevURL := m.cfg.ActiveURL()
+	prevProfile := m.cfg.ActiveProfile()
+	prevLLM, prevKey := prevProfile.LLM, prevProfile.Key
+
+	m.cfg = fresh
+
+	newProfile := m.cfg.ActiveProfile()
+	if prevURL != m.cfg.ActiveURL() || prevLLM != newProfile.LLM || prevKey != newProfile.Key {
+		m.rebuildClient()
+	}
+	return nil
 }
 
 // PrintHelp writes the canonical human-readable command list. Used by --help.
