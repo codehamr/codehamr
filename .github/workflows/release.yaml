@@ -18,7 +18,8 @@ jobs:
         run: |
           VERSION="$(date -u +%Y-%m-%d)"
           gh release delete "$VERSION" --yes --cleanup-tag 2>/dev/null || true
-          git tag "$VERSION"
+          git push origin --delete "$VERSION" 2>/dev/null || true
+          git tag -f "$VERSION"
           git push origin "$VERSION"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
