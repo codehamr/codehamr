@@ -1,5 +1,5 @@
-// Package tools holds the local executors (bash, write_file) and the
-// tool-router that dispatches assistant tool calls to them by name.
+// Package tools holds the local executors (bash, write_file, edit_file) and
+// the tool-router that dispatches assistant tool calls to them by name.
 package tools
 
 import (

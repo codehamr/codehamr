@@ -59,9 +59,9 @@ func readEvent(ch <-chan llm.Event) tea.Cmd {
 // and the returned toolResultMsg carries that ctx so Update can drop the
 // message when it lands on a turn that has since moved on.
 //
-// No outer timeout is wrapped here — bash and write_file own their own
-// per-call timeouts (bash defaults to 2 min, capped at 3600s by the schema;
-// write_file is filesystem-fast and uses no timeout). Wrapping in a hardcoded
+// No outer timeout is wrapped here — bash, write_file, and edit_file own their
+// own per-call timeouts (bash defaults to 2 min, capped at 3600s by the schema;
+// write_file and edit_file are filesystem-fast and use no timeout). Wrapping in a hardcoded
 // outer cap would silently override the model-set bash timeout, so a request
 // for a 30-min docker build would die at 3 min with a confusing "timeout"
 // inside an hour-long apparent allowance.

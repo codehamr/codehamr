@@ -1,7 +1,7 @@
 // Package gysd is codehamr's single-mode loop controller. "GYSD" is short
 // for Get Your Shit Done: one loop, three loop tools (verify, done, ask),
-// one rule — show evidence, don't claim. The agent works with bash and
-// write_file as today; every turn must end with exactly one of the three
+// one rule — show evidence, don't claim. The agent works with bash,
+// write_file, and edit_file; every turn must end with exactly one of the three
 // loop tools, and this package owns the state machine that enforces it.
 //
 // The package never executes subprocesses itself. The TUI runs the bash
@@ -101,7 +101,7 @@ func (s *Session) BeginTurn() {
 }
 
 // NoteToolCall is the S2 (identical-call repeat) gate. Called by the TUI
-// before dispatching ANY tool — bash, write_file, verify, done, ask. The
+// before dispatching ANY tool — bash, write_file, edit_file, verify, done, ask. The
 // canonical key is `name|json(args)` with sorted JSON keys (encoding/json
 // sorts map keys deterministically), so logically-equal arg sets always
 // produce the same key regardless of insertion order.

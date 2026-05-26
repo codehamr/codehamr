@@ -782,7 +782,7 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 
 // dispatchNextTool pops the next pending tool call and routes it. GYSD
 // loop tools (verify/done/ask) short-circuit through gysd.Session;
-// everything else (bash, write_file) flows through runToolCall. S2
+// everything else (bash, write_file, edit_file) flows through runToolCall. S2
 // (identical-call repeat detector) is enforced here before any dispatch —
 // 3rd identical call (name + canonical args) in the last MaxRecentCalls
 // aborts the whole pending queue and yields.
