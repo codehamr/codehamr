@@ -14,10 +14,13 @@ stays yours.
 Three slash commands, one embedded system prompt, no router, no
 sub-agents, no skill system, no MCP. That's it.
 
-The agent runs in one deterministic loop, internally called *GYSD*
-(Get Your Shit Done), where every turn ends with one of three tools:
-`verify` (run a check), `done` (claim completion, must quote a passing
-verify as proof), or `ask` (yield back to you). No hallucinated success.
+The agent runs one plain loop: it calls tools until the work is done,
+then replies. A turn ends when it stops calling tools and hands control
+back to you — no special end-of-turn ceremony. The agent works with
+`bash`, `read_file`, `write_file`, and `edit_file`, investigating your
+project directly rather than guessing, and verifies its own work (running
+the tests, compiling, loading the page) as a habit the system prompt
+instils — not a gate that blocks progress.
 
 ## Install
 

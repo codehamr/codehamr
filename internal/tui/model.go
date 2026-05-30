@@ -17,7 +17,6 @@ import (
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
-	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
 	"github.com/codehamr/codehamr/internal/tools"
 )
@@ -96,8 +95,7 @@ type Model struct {
 
 	// turn-level stats (reset in finalizeTurn) + session-cumulative token
 	// count (reset only by /clear, so the status bar carries the running
-	// total across the whole hamr session). Tool-call accounting lives on
-	// gysd.Session — this struct only carries display stats.
+	// total across the whole hamr session).
 	turnTokens    int
 	turnElapsed   time.Duration
 	sessionTokens int
@@ -152,12 +150,19 @@ type Model struct {
 	status string // transient status-bar warning (cleared next render cycle)
 	phase  phase  // idle / thinking / streaming / running
 
-	// gysd holds the loop state machine: VerifyLog (evidence pool for
-	// `done`), recent-call ring (S2), red-streak / missing-loop-tool
-	// counters, and the deterministic Schranken from data/gysd.md. One
-	// instance per Model; the package never spawns goroutines so all
-	// mutations stay on the UI thread.
-	gysd *gysd.Session
+	// Repeated-failure nudge — the only deterministic backstop that survived
+	// GYSD's removal, and the lean replacement for its five Schranken. A turn
+	// otherwise ends purely when the model stops calling tools; nothing forces
+	// a tool or yields. lastToolKey is the target identity of the most recently
+	// dispatched tool (set in dispatchNextTool); failKey/failStreak track how
+	// many times in a row that SAME target failed the SAME way. At
+	// maxToolFailStreak we inject one system note telling the model to change
+	// approach — a nudge, never a hard yield. Keyed on tool+target (not full
+	// args) so cosmetic retry differences can't defeat it the way they defeated
+	// GYSD's byte-exact S2 guard.
+	lastToolKey string
+	failKey     string
+	failStreak  int
 
 	// liveContextSize is the per-profile, runtime-only context window
 	// reported by the server via X-Context-Window. Populated by Probe at
@@ -200,7 +205,6 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 		scroll:          new(strings.Builder),
 		histIdx:         -1,
 		liveContextSize: map[string]int{},
-		gysd:            &gysd.Session{},
 	}
 	// Seed prompt history from .codehamr/history so ↑ recalls prompts the
 	// user typed in earlier sessions of this project. Loaded entries carry
@@ -389,6 +393,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		dbgWriteMessage("tool_result", msg.Msg)
 		m.history = append(m.history, msg.Msg)
+		m.recordToolOutcome(msg.Msg.ToolName, msg.Msg.Content)
 		// When the assistant emitted multiple tool calls in one round, drain
 		// the rest before re-entering chat. OpenAI rejects an
 		// `assistant.tool_calls` message followed by fewer `tool` messages
@@ -398,14 +403,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.pending) > 0 {
 			return m.dispatchNextTool()
 		}
+		// Queue drained — safe to inject the repeated-failure nudge now. A
+		// system message wedged between an assistant.tool_calls and its tool
+		// results would break that pairing and 400 the next request, so it
+		// only lands once every result for the round is recorded.
+		m.maybeFailureNudge()
 		m.phase = phaseThinking
 		return m, m.startChat()
-
-	case verifyResultMsg:
-		// applyVerifyResult guards against stale msgs by checking
-		// phase.active() before mutating gysd state — same drop-on-
-		// inactive contract as toolResultMsg.
-		return m.applyVerifyResult(msg)
 
 	case quitArmResetMsg:
 		if !m.quitArmedAt.IsZero() && time.Now().After(m.quitArmedAt) {
@@ -524,11 +528,10 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		dbgWritef("user_slash", "%s", safeText)
 		return m.runSlash(sendText)
 	}
-	// Every user message starts a fresh GYSD sub-loop: the previous
-	// VerifyLog, RedStreak, RecentCalls, and missing-loop-tool streak
-	// don't carry into the next goal. The model's history persists
-	// separately — only the orchestrator's evidence pool is wiped.
-	m.gysd.AfterUserMessage()
+	// A new user message is a new goal — drop any in-progress repeated-
+	// failure streak so a stale count from the previous goal can't trip the
+	// nudge early. History persists; only this counter resets.
+	m.failKey, m.failStreak = "", 0
 	dbgWritef("user", "%s", sendText)
 	return m, m.appendUserTurn(sendText)
 }
@@ -543,8 +546,7 @@ func (m *Model) startChat() tea.Cmd {
 // installTurnContext cancels any in-flight turn context and installs a
 // fresh per-turn root on m.turnCtx / m.cancel. The cancel-old-then-
 // install-new pattern keeps Ctrl+C semantics consistent: one m.cancel()
-// call always unwinds the whole current cascade, whether it was started
-// by submit or a GYSD S4 nudge.
+// call always unwinds the whole current cascade.
 func (m *Model) installTurnContext() {
 	if m.cancel != nil {
 		m.cancel()
@@ -552,14 +554,12 @@ func (m *Model) installTurnContext() {
 	m.turnCtx, m.cancel = context.WithCancel(context.Background())
 }
 
-// beginTurn installs a fresh per-turn context, flips phase to thinking,
-// resets the per-turn loop-tool flag, and returns the chat stream-reader
-// Cmd. Every path that starts a new LLM round (user submit, S4 nudge for
-// missing loop tool) funnels through here so Ctrl+C cancels the whole
-// cascade in one m.cancel() call.
+// beginTurn installs a fresh per-turn context, flips phase to thinking, and
+// returns the chat stream-reader Cmd. Every path that starts a new LLM round
+// funnels through here so Ctrl+C cancels the whole cascade in one m.cancel()
+// call.
 func (m *Model) beginTurn() tea.Cmd {
 	m.installTurnContext()
-	m.gysd.BeginTurn()
 	m.phase = phaseThinking
 	return m.startChat()
 }
@@ -600,19 +600,16 @@ func (m *Model) buildMessages() []chmctx.Message {
 	return append(out, r.Messages...)
 }
 
+// buildTools exposes the four local tools every turn: bash, read_file,
+// write_file, edit_file. There is no loop/control tool — a turn ends simply
+// when the model stops emitting tool calls (see handleStreamClosed).
 func (m *Model) buildTools() []llm.Tool {
-	out := []llm.Tool{}
-	out = append(out, schemaToTool(tools.BashSchema()))
-	out = append(out, schemaToTool(tools.WriteFileSchema()))
-	out = append(out, schemaToTool(tools.EditFileSchema()))
-	// GYSD loop tools (verify/done/ask) are always exposed alongside
-	// the bash/write_file/edit_file trio — one mode, no phase gating,
-	// no triage. The orchestrator enforces "every turn ends with one
-	// of these three" via the gysd Session, not via tool-availability tricks.
-	for _, s := range gysd.LoopTools() {
-		out = append(out, schemaToTool(s))
+	return []llm.Tool{
+		schemaToTool(tools.BashSchema()),
+		schemaToTool(tools.ReadFileSchema()),
+		schemaToTool(tools.WriteFileSchema()),
+		schemaToTool(tools.EditFileSchema()),
 	}
-	return out
 }
 
 // schemaToTool unwraps a tool schema (the map[string]any shape shared by
@@ -750,9 +747,10 @@ func (m *Model) finalizeTurn() {
 }
 
 // handleStreamClosed drives what happens after the LLM stream finishes for
-// one round. If tool calls are pending, dispatch the next one. Otherwise
-// finalize the turn, run the GYSD loop-conformity check (S4/S5), and
-// either nudge for verify/done/ask, yield to the user, or end normally.
+// one round. If tool calls are pending, dispatch the next one. Otherwise the
+// model has nothing more to do — finalize the turn and hand control back to
+// the user. A turn ends precisely when the assistant emits no tool calls;
+// there is no loop tool to land on and nothing to enforce.
 func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 	m.stream = nil
 	// Stale close from a turn the user already cancelled (handleCtrlC /
@@ -764,41 +762,102 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 		return m.dispatchNextTool()
 	}
 	m.finalizeTurn()
-	// GYSD S4/S5: a turn that didn't end with verify/done/ask gets a
-	// nudge appended as a user-turn (re-enters chat with one more
-	// chance), or yields hard once the streak hits MaxMissingStreak.
-	r := m.gysd.EnsureLoopTool()
-	switch {
-	case r.Yield:
-		m.appendLine(styleWarn.Render(r.UserBlock))
-		m.endTurn()
-		return m, nil
-	case r.ToolPayload != "":
-		return m, m.appendUserTurn(r.ToolPayload)
-	}
 	m.endTurn()
 	return m, nil
 }
 
-// dispatchNextTool pops the next pending tool call and routes it. GYSD
-// loop tools (verify/done/ask) short-circuit through gysd.Session;
-// everything else (bash, write_file, edit_file) flows through runToolCall. S2
-// (identical-call repeat detector) is enforced here before any dispatch —
-// 3rd identical call (name + canonical args) in the last MaxRecentCalls
-// aborts the whole pending queue and yields.
+// dispatchNextTool pops the next pending tool call and runs it. Every tool
+// (bash, read_file, write_file, edit_file) flows through runToolCall — there
+// are no special-cased tools. lastToolKey records this call's target so the
+// repeated-failure nudge can tell when the model keeps retrying the same
+// failing operation (see recordToolOutcome).
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	call := m.pending[0]
 	m.pending = m.pending[1:]
-	if r := m.gysd.NoteToolCall(call.Name, call.Arguments); r.Yield {
-		m.abortTurn(styleWarn.Render(r.UserBlock))
-		return m, nil
-	}
 	m.appendLine(styleDim.Render(tools.InlineStatus(call)))
-	if gysd.IsLoopTool(call.Name) {
-		return m.handleGYSDTool(call)
-	}
+	m.lastToolKey = toolTargetKey(call)
 	m.phase = phaseRunning
 	return m, runToolCall(m.turnCtx, call)
+}
+
+// maxToolFailStreak is how many consecutive same-target failures trigger the
+// nudge. Five is generous: a model legitimately iterating on a hard edit gets
+// several attempts before the orchestrator points out it's stuck — tuned to
+// catch genuine loops without interrupting honest trial-and-error.
+const maxToolFailStreak = 5
+
+// toolTargetKey is the stable identity used to detect a repeated-failure loop:
+// tool name + its target (the path for the file tools, the first line of the
+// command for bash). Deliberately NOT the full argument set — GYSD's old S2
+// guard keyed on byte-exact args and so was defeated by any cosmetic change
+// between retries (a regenerated file body, a reworded command). Keying on the
+// target catches a model hammering the same operation while leaving varied
+// exploration alone.
+func toolTargetKey(call chmctx.ToolCall) string {
+	switch call.Name {
+	case tools.WriteFileName, tools.EditFileName, tools.ReadFileName:
+		path, _ := call.Arguments["path"].(string)
+		return call.Name + "|" + path
+	case tools.BashName:
+		cmd, _ := call.Arguments["cmd"].(string)
+		if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+			cmd = cmd[:i]
+		}
+		return call.Name + "|" + strings.TrimSpace(cmd)
+	}
+	return call.Name
+}
+
+// toolResultFailed reports whether a tool result string is an error the model
+// should react to. The file tools wrap every error in parens ("(write error:
+// ...)", "(not found: ...)") and report success as plain text ("wrote N
+// bytes"); bash appends "(exit: N)" / "(timeout after ...)" on failure. A user
+// Ctrl+C ("(cancelled)") is never counted as a failure.
+func toolResultFailed(name, result string) bool {
+	if strings.Contains(result, "(cancelled)") {
+		return false
+	}
+	switch name {
+	case tools.WriteFileName, tools.EditFileName, tools.ReadFileName:
+		return strings.HasPrefix(strings.TrimSpace(result), "(")
+	case tools.BashName:
+		return strings.Contains(result, "\n(exit: ") || strings.Contains(result, "(timeout after ")
+	}
+	return false
+}
+
+// recordToolOutcome updates the repeated-failure streak from one finished tool
+// result. A success (or a failure of a different target than last time) resets
+// the streak; a failure of the same target extends it. lastToolKey was stamped
+// in dispatchNextTool for the call this result belongs to.
+func (m *Model) recordToolOutcome(name, content string) {
+	if !toolResultFailed(name, content) {
+		m.failKey, m.failStreak = "", 0
+		return
+	}
+	if m.lastToolKey == m.failKey && m.failKey != "" {
+		m.failStreak++
+		return
+	}
+	m.failKey = m.lastToolKey
+	m.failStreak = 1
+}
+
+// maybeFailureNudge appends one system-role note when the same target has
+// failed maxToolFailStreak times in a row, then resets the streak so it fires
+// at most once per run of failures. A nudge, not a yield: the model stays in
+// control and decides whether to pivot or stop and tell the user.
+func (m *Model) maybeFailureNudge() {
+	if m.failStreak < maxToolFailStreak {
+		return
+	}
+	m.history = append(m.history, chmctx.Message{
+		Role: chmctx.RoleSystem,
+		Content: fmt.Sprintf(
+			"Note: the last %d tool calls to the same target failed the same way. Stop repeating it — read the error, change your approach, or tell the user what's blocking you.",
+			m.failStreak),
+	})
+	m.failKey, m.failStreak = "", 0
 }
 
 // cursorOnFirstLine: true when ↑ should walk the prompt history instead of

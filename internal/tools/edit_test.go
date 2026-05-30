@@ -49,7 +49,7 @@ func TestEditFileOldNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := EditFile(path, "missing", "x")
-	if !strings.Contains(s, "not found") {
+	if !strings.Contains(s, "not found") || !strings.Contains(s, path) {
 		t.Fatalf("bad: %q", s)
 	}
 	// File untouched.

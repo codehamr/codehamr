@@ -40,7 +40,7 @@ func WriteFileSchema() map[string]any {
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Absolute or relative file path.",
+						"description": "Absolute or relative file path. Relative paths resolve against the working directory.",
 					},
 					"content": map[string]any{
 						"type":        "string",

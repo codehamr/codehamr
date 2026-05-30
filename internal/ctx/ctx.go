@@ -50,12 +50,12 @@ const (
 	ToolHeadTail  = 2000
 	// FixedSystem reserves budget for the embedded system prompt + working-
 	// directory anchor (see tui.buildSystem). PROMPT_SYS.md is currently
-	// ~3780 tokens after the per-message overhead; 4000 keeps a small
+	// ~2335 tokens after the per-message overhead; 2600 keeps a small
 	// buffer so an absent-minded prompt edit doesn't push the packer into
 	// silent over-budget territory on small-ctx (32k/64k) profiles. A test
 	// in internal/tui pins this against the live embedded prompt — bump
 	// here when the test fails, do not relax the assertion.
-	FixedSystem = 4000
+	FixedSystem = 2600
 	FixedTools  = 1500
 )
 

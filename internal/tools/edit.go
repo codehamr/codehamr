@@ -31,7 +31,7 @@ func EditFile(path, oldString, newString string) string {
 	content := string(raw)
 	n := strings.Count(content, oldString)
 	if n == 0 {
-		return "(not found: old_string does not appear in file)"
+		return fmt.Sprintf("(not found: old_string does not appear in %s)", path)
 	}
 	if n > 1 {
 		return fmt.Sprintf("(ambiguous: old_string appears %d times — provide more context to make it unique)", n)
@@ -58,7 +58,7 @@ func EditFileSchema() map[string]any {
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Absolute or relative file path.",
+						"description": "Absolute or relative file path. Relative paths resolve against the working directory.",
 					},
 					"old_string": map[string]any{
 						"type":        "string",

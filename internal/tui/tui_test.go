@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,8 +20,8 @@ import (
 	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/config"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
-	"github.com/codehamr/codehamr/internal/gysd"
 	"github.com/codehamr/codehamr/internal/llm"
+	"github.com/codehamr/codehamr/internal/tools"
 )
 
 // newTestModel wires a model against a mock OpenAI SSE server so we can
@@ -53,14 +51,17 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 
 // TestSystemPromptIncludesWorkingDirAndInvestigateRule: the system prompt
 // handed to the LLM must (a) include the embedded PROMPT_SYS.md rule that
-// tells the model to investigate files first, and (b) end with the working
-// directory so "hier" / "here" resolves to a concrete path.
+// tells the model to investigate files itself rather than asking the user to
+// paste them, and (b) end with the working directory so "hier" / "here"
+// resolves to a concrete path. The exact phrasing changed when GYSD was
+// removed (the prompt no longer says "investigate first"); this asserts on the
+// surviving instruction that carries the same intent.
 func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	projectDir := "/workspaces/codehamr"
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
-	if !strings.Contains(m.system, "investigate first") {
-		t.Fatalf("system prompt missing the 'investigate first' rule:\n%s", m.system)
+	if !strings.Contains(m.system, "investigate with `read_file` and `bash`") {
+		t.Fatalf("system prompt missing the investigate-files-yourself rule:\n%s", m.system)
 	}
 	if !strings.Contains(m.system, "Working directory: "+projectDir) {
 		t.Fatalf("system prompt missing working-directory anchor for %q:\n%s",
@@ -905,9 +906,10 @@ func TestSubmitStreamsUpToDone(t *testing.T) {
 }
 
 func TestToolCallRoundTripExecutesBash(t *testing.T) {
-	// Turn 1: bash tool call. Turn 2: ask — yields cleanly under the GYSD
-	// loop-tool requirement. The ask path is the test's "stop here" lever
-	// without any executable verify infrastructure in test.
+	// Turn 1: bash tool call. Turn 2: plain content with NO tool call — the
+	// new turn-end contract is simply "the assistant stops emitting tool
+	// calls" (handleStreamClosed → finalizeTurn → endTurn). No loop tool, no
+	// ask: the second round's content reply is the natural stop.
 	turn := 0
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -918,9 +920,8 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		default:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"echoed HAMMER"}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"ask","arguments":"{\"question\":\"Was the echo what you wanted?\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":1}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"echoed HAMMER for you"}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		}
 	})
@@ -931,15 +932,20 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 	if turn != 2 {
 		t.Fatalf("expected 2 LLM turns, got %d", turn)
 	}
-	// history: user, assistant(bash call), tool(bash result), assistant(content + ask call)
+	// history: user, assistant(bash call), tool(bash result), assistant(content)
 	if len(final.history) != 4 {
 		t.Fatalf("history wrong: %d messages", len(final.history))
 	}
 	if final.history[2].Role != "tool" || !strings.Contains(final.history[2].Content, "HAMMER") {
 		t.Fatalf("tool result missing: %+v", final.history[2])
 	}
-	if !strings.Contains(stripANSI(final.scroll.String()), "Was the echo what you wanted?") {
-		t.Fatalf("ask question missing from scroll: %q", final.scroll.String())
+	if !strings.Contains(stripANSI(final.scroll.String()), "echoed HAMMER for you") {
+		t.Fatalf("final assistant content missing from scroll: %q", final.scroll.String())
+	}
+	// A turn that ends with no tool calls returns to idle and hands control
+	// back to the user.
+	if final.phase.active() {
+		t.Fatalf("turn ending with no tool calls must return to idle, phase=%v", final.phase)
 	}
 	// Per-turn summary must sum tokens across both LLM rounds, not overwrite.
 	// Round 1 reports usage.completion_tokens=5, round 2 reports 1. Sum = 6.
@@ -949,113 +955,91 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 	}
 }
 
-// TestVerifyDoneRoundTripAcceptsRealEvidence drives the crown-jewel GYSD
-// evidence contract end-to-end through the live tui turn loop — the one
-// product behaviour that was previously proven only as gysd units plus tui
-// staleness guards, never stitched together through Model.Update. Turn 1: the
-// model calls `verify`, which runs a REAL subprocess via gysd.RunCommand whose
-// green output is recorded as evidence. Turn 2: the model calls `done` quoting
-// that output; HandleDone matches the >=20-char substring against the green
-// verify and ends the loop. If any link in the chain (dispatchVerify →
-// RunCommand → verifyResultMsg → applyVerifyResult → RecordVerify → HandleDone)
-// were broken, the marker wouldn't reach the evidence pool and `done` would be
-// rejected — so the accepted-summary assertion exercises the whole wiring.
-func TestVerifyDoneRoundTripAcceptsRealEvidence(t *testing.T) {
-	const marker = "VERIFY_PASSED_MARKER_1234" // 25 chars > gysd.MinEvidenceLen (20)
-	turn := 0
-	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		turn++
-		switch turn {
-		case 1: // verify a command whose stdout carries the marker
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"v1","function":{"name":"verify","arguments":"{\"command\":\"echo `+marker+`\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":3}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
-		default: // done, quoting the real verify output as evidence
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"d1","function":{"name":"done","arguments":"{\"summary\":\"echoed the marker\",\"evidence\":\"`+marker+`\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":2}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+// TestBuildToolsExposesExactlyFourTools pins the new tool roster: bash,
+// read_file, write_file, edit_file — in that order, by name — with no
+// loop/control tool (verify/done/ask are gone with GYSD). The order is part
+// of the contract: the model sees these tools in the payload in this sequence.
+func TestBuildToolsExposesExactlyFourTools(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	got := m.buildTools()
+	want := []string{
+		tools.BashName,
+		tools.ReadFileName,
+		tools.WriteFileName,
+		tools.EditFileName,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("buildTools returned %d tools, want %d: %+v", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i].Function.Name != name {
+			t.Fatalf("tool[%d] = %q, want %q (order matters)", i, got[i].Function.Name, name)
 		}
-	})
-	mm, cmd := m.submit("make it pass", "make it pass", promptEntry{display: "make it pass"})
-	out, _ := drain(mm, cmd)
-	final := out.(Model)
-
-	if turn != 2 {
-		t.Fatalf("expected a verify turn then a done turn, got %d server turns", turn)
-	}
-	scroll := stripANSI(final.scroll.String())
-	// The live verify outcome line proves a REAL subprocess ran and its
-	// stdout reached the UI (verifyOutcomeLine renders the first output line).
-	if !strings.Contains(scroll, marker) {
-		t.Fatalf("verify outcome line (real subprocess output) missing from scroll:\n%s", scroll)
-	}
-	// The accepted-done summary proves HandleDone matched the evidence against
-	// the green verify recorded through the live wiring — the whole point.
-	if !strings.Contains(scroll, "✓ echoed the marker") {
-		t.Fatalf("done was not accepted end-to-end (evidence chain broken):\n%s", scroll)
-	}
-	if final.phase.active() {
-		t.Fatalf("an accepted done must end the turn, phase=%v", final.phase)
-	}
-	// HandleDone calls Session.Reset on acceptance.
-	if len(final.gysd.VerifyLog) != 0 {
-		t.Fatalf("accepted done should Reset the session, VerifyLog=%+v", final.gysd.VerifyLog)
 	}
 }
 
-// TestHandleStreamClosedNudgesOnMissingLoopTool pins the S4 nudge wiring in
-// handleStreamClosed (model.go:776-778): a turn that ends with no pending
-// tool calls and no loop tool ran must bump MissingStreak and re-enter chat
-// with the nudge appended as a user message. grep showed no test reached this
-// branch — only the gysd-unit EnsureLoopTool counter was covered.
-func TestHandleStreamClosedNudgesOnMissingLoopTool(t *testing.T) {
+// TestTurnEndsWhenAssistantEmitsNoToolCalls pins the new turn-end contract: a
+// final assistant message with no tool calls returns the model to phaseIdle
+// and hands control back to the user — no loop-tool nudge, no forced tool, no
+// extra user/system message appended to history. This replaces the deleted
+// GYSD S4/S5 missing-loop-tool nudge+yield tests.
+func TestTurnEndsWhenAssistantEmitsNoToolCalls(t *testing.T) {
+	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"all done, nothing to run"}}]}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":4}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	mm, cmd := m.submit("just answer", "just answer", promptEntry{display: "just answer"})
+	out, _ := drain(mm, cmd)
+	final := out.(Model)
+
+	if final.phase.active() {
+		t.Fatalf("no-tool-call turn must return to idle, phase=%v", final.phase)
+	}
+	// History should be exactly: user prompt + assistant reply. No nudge
+	// message of any role appended.
+	if len(final.history) != 2 {
+		t.Fatalf("expected 2 history messages (user + assistant), got %d: %+v",
+			len(final.history), final.history)
+	}
+	if final.history[0].Role != chmctx.RoleUser {
+		t.Fatalf("history[0] should be the user prompt, got %+v", final.history[0])
+	}
+	if final.history[1].Role != chmctx.RoleAssistant {
+		t.Fatalf("history[1] should be the assistant reply, got %+v", final.history[1])
+	}
+	if !strings.Contains(stripANSI(final.scroll.String()), "all done, nothing to run") {
+		t.Fatalf("assistant content missing from scroll:\n%s", final.scroll.String())
+	}
+}
+
+// TestHandleStreamClosedEndsTurnWithNoPending pins the unit-level turn-end:
+// handleStreamClosed with an empty pending queue finalizes the turn, returns
+// to idle, and returns no follow-up Cmd. The replacement for the deleted S4
+// nudge wiring — there is no loop tool to land on, nothing to enforce, no
+// re-entry into chat.
+func TestHandleStreamClosedEndsTurnWithNoPending(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.phase = phaseStreaming
 	m.installTurnContext() // live turnCtx/cancel
-	m.gysd.BeginTurn()     // LoopToolThisTurn=false, no loop tool ran
+	m.stream = make(chan llm.Event)
 	before := len(m.history)
 
 	out, cmd := m.handleStreamClosed()
 	om := out.(Model)
 
-	if om.gysd.MissingStreak != 1 {
-		t.Fatalf("first missing-loop-tool turn must bump MissingStreak to 1, got %d", om.gysd.MissingStreak)
-	}
-	if cmd == nil {
-		t.Fatal("S4 nudge must re-enter chat with a new-turn Cmd")
-	}
-	if len(om.history) != before+1 {
-		t.Fatalf("S4 nudge must append one user message, history grew by %d", len(om.history)-before)
-	}
-	last := om.history[len(om.history)-1]
-	if last.Role != chmctx.RoleUser || !strings.Contains(last.Content, "verify, done, or ask") {
-		t.Fatalf("S4 nudge message wrong: %+v", last)
-	}
-}
-
-// TestHandleStreamClosedYieldsAfterRepeatedMissingLoopTool pins the S5 hard
-// yield through the live loop (model.go:772-775): once MissingStreak reaches
-// MaxMissingStreak the turn ends with a user-facing block instead of nudging
-// again. Complements the S4 nudge test above.
-func TestHandleStreamClosedYieldsAfterRepeatedMissingLoopTool(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.phase = phaseStreaming
-	m.installTurnContext()
-	m.gysd.BeginTurn()
-	m.gysd.MissingStreak = gysd.MaxMissingStreak - 1 // next miss trips S5
-
-	out, cmd := m.handleStreamClosed()
-	om := out.(Model)
-
 	if cmd != nil {
-		t.Fatal("S5 must end the turn, not start another (no Cmd)")
+		t.Fatal("a no-pending stream close must end the turn, not start another (nil Cmd)")
 	}
 	if om.phase.active() {
-		t.Fatalf("S5 yield must end the turn, phase=%v", om.phase)
+		t.Fatalf("turn must return to idle, phase=%v", om.phase)
 	}
-	if !strings.Contains(stripANSI(om.scroll.String()), "drifted off the verify/done/ask loop") {
-		t.Fatalf("S5 user block missing from scroll:\n%s", om.scroll.String())
+	if len(om.history) != before {
+		t.Fatalf("turn end must not append any message, history grew by %d", len(om.history)-before)
+	}
+	if om.cancel != nil || om.turnCtx != nil {
+		t.Fatal("endTurn must clear cancel/turnCtx")
 	}
 }
 
@@ -1544,183 +1528,221 @@ func TestSessionTokensSurviveFinalizeTurn(t *testing.T) {
 	}
 }
 
-// TestArgIntRejectsNaNAndInf: a malformed backend that emits non-finite
-// numbers in tool args (some weakly-typed providers do; JSON technically
-// forbids it but providers vary) must not propagate NaN/Inf through to
-// time.Duration arithmetic. NaN comparisons all evaluate to false so a
-// naive `n < 0` guard would let it through, and `int(NaN)` on amd64
-// yields MinInt64, which the gysd timeout path would then multiply by
-// 1e9 and wrap to chaos. Each non-finite input must collapse to 0.
-func TestArgIntRejectsNaNAndInf(t *testing.T) {
-	cases := map[string]float64{
-		"NaN":          math.NaN(),
-		"PositiveInf":  math.Inf(+1),
-		"NegativeInf":  math.Inf(-1),
-		"PositiveSane": 30,
-		"NegativeSane": -1,
-		"Zero":         0,
+// TestToolTargetKey pins the stable identity used by the repeated-failure
+// nudge: file tools key on tool+path, bash keys on tool + the trimmed first
+// line of the command, and anything else keys on the bare tool name. This is
+// deliberately NOT the full argument set — a cosmetic change between retries
+// (regenerated file body, reworded command tail) must not reset the streak.
+func TestToolTargetKey(t *testing.T) {
+	cases := []struct {
+		name string
+		call chmctx.ToolCall
+		want string
+	}{
+		{"write_file keys on path", chmctx.ToolCall{
+			Name: tools.WriteFileName, Arguments: map[string]any{"path": "/a/b.go", "content": "anything"},
+		}, tools.WriteFileName + "|/a/b.go"},
+		{"edit_file keys on path", chmctx.ToolCall{
+			Name: tools.EditFileName, Arguments: map[string]any{"path": "/a/b.go", "old_string": "x", "new_string": "y"},
+		}, tools.EditFileName + "|/a/b.go"},
+		{"read_file keys on path", chmctx.ToolCall{
+			Name: tools.ReadFileName, Arguments: map[string]any{"path": "/a/b.go"},
+		}, tools.ReadFileName + "|/a/b.go"},
+		{"bash keys on first line of cmd", chmctx.ToolCall{
+			Name: tools.BashName, Arguments: map[string]any{"cmd": "go test ./...\necho done"},
+		}, tools.BashName + "|go test ./..."},
+		{"bash trims surrounding whitespace", chmctx.ToolCall{
+			Name: tools.BashName, Arguments: map[string]any{"cmd": "   ls -la   \nmore"},
+		}, tools.BashName + "|ls -la"},
+		{"unknown tool keys on name", chmctx.ToolCall{
+			Name: "context7", Arguments: map[string]any{"query": "x"},
+		}, "context7"},
 	}
-	wantBy := map[string]int{
-		"NaN":          0,
-		"PositiveInf":  0,
-		"NegativeInf":  0,
-		"PositiveSane": 30,
-		"NegativeSane": 0,
-		"Zero":         0,
-	}
-	for name, in := range cases {
-		t.Run(name, func(t *testing.T) {
-			got := argInt(map[string]any{"timeout_seconds": in}, "timeout_seconds")
-			if got != wantBy[name] {
-				t.Fatalf("argInt(%v) = %d, want %d", in, got, wantBy[name])
-			}
-		})
-	}
-	// Missing key still returns 0 (the "use default" sentinel).
-	if got := argInt(map[string]any{}, "timeout_seconds"); got != 0 {
-		t.Fatalf("missing key should return 0, got %d", got)
-	}
-	// Wrong-type still returns 0.
-	if got := argInt(map[string]any{"timeout_seconds": "not a number"}, "timeout_seconds"); got != 0 {
-		t.Fatalf("string value should return 0, got %d", got)
-	}
-}
-
-// TestVerifyOutcomeLineRuneBoundaryTruncate pins down "byte 157 lands inside
-// a multi-byte rune" for a non-ASCII first line. The naive `snippet[:157]`
-// cuts the leading 'ä' UTF-8 sequence in half on the way out, leaving an
-// orphaned continuation byte that tea.Println dumps to the terminal as
-// invalid UTF-8. Snapping the cut down to the previous rune boundary keeps
-// the output a valid UTF-8 string at the cost of one or two characters less
-// than the byte budget — well worth it for a status line the user reads.
-func TestVerifyOutcomeLineRuneBoundaryTruncate(t *testing.T) {
-	// 'ä' is 2 bytes in UTF-8; 100 of them = 200 bytes well past the 160
-	// byte cut, with the cut deterministically landing inside a sequence.
-	o := gysd.RunOutcome{Output: strings.Repeat("ä", 100) + " end"}
-	line := verifyOutcomeLine(o)
-	if !utf8.ValidString(line) {
-		t.Fatalf("verifyOutcomeLine produced invalid UTF-8 (cut mid-rune): %q", line)
-	}
-}
-
-// TestVerifyOutcomeLineStripsANSI: pytest, cargo, go test, grep —
-// everything that lights up an ANSI-friendly terminal — emits CSI colour
-// codes on every line. The live outcome banner truncates the first line at
-// 160 bytes; without scrubbing first, that cut can land mid-CSI and the
-// half-escape lands on the user's terminal via tea.Println where it can
-// stick the prompt in red, flip into alt-screen, or worse. RecordVerify
-// already scrubs the stored copy — this test pins the same scrub on the
-// live UI path so the two stay in lockstep.
-func TestVerifyOutcomeLineStripsANSI(t *testing.T) {
-	o := gysd.RunOutcome{
-		Output: "\x1b[31mFAIL test_thing.py::test_x\x1b[0m\nmore details below\n",
-	}
-	got := verifyOutcomeLine(o)
-	if strings.ContainsRune(got, 0x1b) {
-		t.Fatalf("ANSI escape leaked into outcome line: %q", got)
-	}
-	if !strings.Contains(got, "FAIL test_thing.py::test_x") {
-		t.Fatalf("snippet content lost during strip: %q", got)
-	}
-
-	// Trailing partial CSI at the byte-160 cut would otherwise survive
-	// (the 160-byte slice cleaves the sequence). Force the case: a long
-	// noise prefix, a trailing CSI, and verify nothing escapes.
-	long := strings.Repeat("x", 170) + "\x1b[31"
-	got = verifyOutcomeLine(gysd.RunOutcome{Output: long, ExitCode: 1})
-	if strings.ContainsRune(got, 0x1b) {
-		t.Fatalf("trailing partial CSI leaked through truncation: %q", got)
-	}
-}
-
-// TestArgIntClampsAtMaxIntBoundary pins down the singular float64 value
-// that slipped past the `n > math.MaxInt` guard. `float64(math.MaxInt64)`
-// rounds *up* to 2^63 because float64 has only 53 mantissa bits, so
-// `n > math.MaxInt` is false at exactly this value (n equals the rounded
-// constant). The next operation, `int(n)`, then converts 2^63 to int64
-// where it overflows — on amd64 the result is MinInt64, which downstream
-// flips PreVerify's `if timeoutSec > 0` gate off and the model lands at
-// the silent default instead of MaxTimeout. The fix uses `>=` so the
-// boundary value lands at MaxInt where it belongs. Probability of a
-// model emitting precisely 9.2233720368547758e+18 is near zero, but the
-// silent overflow is exactly the regression argInt was supposed to catch.
-func TestArgIntClampsAtMaxIntBoundary(t *testing.T) {
-	boundary := float64(math.MaxInt)
-	got := argInt(map[string]any{"timeout_seconds": boundary}, "timeout_seconds")
-	if got <= 0 {
-		t.Fatalf("argInt(float64(MaxInt))=%d — boundary value overflowed int conversion", got)
-	}
-	if got != math.MaxInt {
-		t.Fatalf("argInt(float64(MaxInt))=%d, want MaxInt=%d", got, math.MaxInt)
-	}
-}
-
-// TestArgIntClampsHugePositiveFloat pins down the overflow defence. JSON
-// numbers come through as float64; `int(1e20)` is implementation-defined and
-// on amd64 wraps to MinInt64. Without clamping, PreVerify's `if timeoutSec >
-// 0` would skip the clamp and silently fall back to DefaultTimeout — the
-// model asked for the maximum timeout and got 60s. Clamping to math.MaxInt
-// inside argInt keeps the value positive so PreVerify can clamp it down to
-// MaxTimeout where it belongs.
-func TestArgIntClampsHugePositiveFloat(t *testing.T) {
-	cases := []float64{1e18, 1e20, 1e30, math.MaxFloat64}
-	for _, in := range cases {
-		got := argInt(map[string]any{"timeout_seconds": in}, "timeout_seconds")
-		if got <= 0 {
-			t.Fatalf("argInt(%g) = %d — must be positive (negative leaks past PreVerify gate)", in, got)
-		}
-		// Round-trip through gysd.PreVerify: the model's huge value must land
-		// at MaxTimeout, not at DefaultTimeout (the silent-overflow regression).
-		s := &gysd.Session{}
-		_, timeout, _ := s.PreVerify("ls", got)
-		if timeout != gysd.MaxTimeout {
-			t.Fatalf("PreVerify(%g→%d) = %v, want MaxTimeout=%v", in, got, timeout, gysd.MaxTimeout)
+	for _, c := range cases {
+		if got := toolTargetKey(c.call); got != c.want {
+			t.Errorf("%s: toolTargetKey = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
 
-// TestS2RepeatYieldsTurn: when the same tool call (name + canonical args)
-// would be the 3rd identical attempt within MaxRecentCalls, dispatchNextTool
-// must yield — pending dropped, ctx cancelled, phase=idle, scrollback explains
-// the yield. This is the universal repeat-detector that replaces the per-turn
-// tool-call cap; it works for bash, write_file, verify, done, and ask alike.
-func TestS2RepeatYieldsTurn(t *testing.T) {
+// TestToolResultFailed pins the per-tool failure classifier the nudge keys on:
+// a "(cancelled)" result (user Ctrl+C) is never a failure; file tools fail iff
+// the trimmed result opens with "(" (their error convention); bash fails iff
+// it carries the "\n(exit: " or "(timeout after " markers; a clean bash/file
+// success is not a failure.
+func TestToolResultFailed(t *testing.T) {
+	cases := []struct {
+		name   string
+		tool   string
+		result string
+		want   bool
+	}{
+		{"cancelled is never a failure", tools.BashName, "partial\n(cancelled)", false},
+		{"cancelled file op is not a failure", tools.WriteFileName, "(cancelled)", false},
+		{"bash non-zero exit fails", tools.BashName, "boom\n(exit: exit status 1)", true},
+		{"bash timeout fails", tools.BashName, "slow\n(timeout after 2s)", true},
+		{"bash clean success", tools.BashName, "all green\n", false},
+		{"write_file error fails", tools.WriteFileName, "(write error: permission denied)", true},
+		{"write_file success", tools.WriteFileName, "wrote 5 bytes to /tmp/x", false},
+		{"edit_file not-found fails", tools.EditFileName, "(not found: old_string)", true},
+		{"edit_file success", tools.EditFileName, "edited /tmp/x", false},
+		{"read_file error fails", tools.ReadFileName, "(read error: no such file)", true},
+		{"read_file success", tools.ReadFileName, "package main\n", false},
+	}
+	for _, c := range cases {
+		if got := toolResultFailed(c.tool, c.result); got != c.want {
+			t.Errorf("%s: toolResultFailed(%q, %q) = %v, want %v",
+				c.name, c.tool, c.result, got, c.want)
+		}
+	}
+}
+
+// TestRepeatedFailureNudgeFiresOnceAfterFiveSameTargetFailures drives the
+// repeated-failure backstop end-to-end through the public toolResultMsg path
+// (mirrors how the rest of tui_test.go drives the model). Five consecutive
+// failures of the SAME target append exactly one RoleSystem nudge and reset the
+// streak; the nudge text reports the count. This is the lean replacement for
+// the deleted GYSD S2 repeat-detector.
+func TestRepeatedFailureNudgeFiresOnceAfterFiveSameTargetFailures(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.turnCtx = ctx
-	m.cancel = cancel
+	m.installTurnContext()
 	m.phase = phaseThinking
-	// Pre-load the ring with two identical bash calls. The next dispatch
-	// will be the 3rd and S2 should fire.
-	args := map[string]any{"cmd": "echo x"}
-	m.gysd.NoteToolCall("bash", args)
-	m.gysd.NoteToolCall("bash", args)
-	m.pending = []chmctx.ToolCall{{Name: "bash", Arguments: args}}
+	// The same failing bash target, dispatched and resolved five times. We
+	// stamp lastToolKey the way dispatchNextTool would, then feed the failing
+	// result back through Update's toolResultMsg case.
+	m.lastToolKey = toolTargetKey(chmctx.ToolCall{
+		Name: tools.BashName, Arguments: map[string]any{"cmd": "make build"},
+	})
+	failResult := chmctx.Message{
+		Role: chmctx.RoleTool, ToolName: tools.BashName,
+		Content: "ld: symbol not found\n(exit: exit status 1)",
+	}
 
-	out, _ := m.Update(streamClosedMsg{})
-	om := out.(Model)
+	var mm tea.Model = m
+	for i := 0; i < maxToolFailStreak; i++ {
+		out, _ := mm.(Model).recordAndNudge(failResult)
+		mm = out
+	}
+	final := mm.(Model)
 
-	if om.phase.active() {
-		t.Fatalf("phase must be idle after S2 yield, got %v", om.phase)
+	// Exactly one system nudge, naming the count, after the 5th failure.
+	nudges := 0
+	var last chmctx.Message
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleSystem {
+			nudges++
+			last = msg
+		}
 	}
-	if om.cancel != nil {
-		t.Fatal("cancel must be cleared after S2 yield")
+	if nudges != 1 {
+		t.Fatalf("expected exactly one RoleSystem nudge after %d same-target failures, got %d:\n%+v",
+			maxToolFailStreak, nudges, final.history)
 	}
-	if om.turnCtx != nil {
-		t.Fatal("turnCtx must be cleared after S2 yield")
+	if !strings.Contains(last.Content, fmt.Sprintf("last %d tool calls", maxToolFailStreak)) {
+		t.Fatalf("nudge should name the streak count: %q", last.Content)
 	}
-	if len(om.pending) != 0 {
-		t.Fatalf("pending must be dropped: %+v", om.pending)
+	// Streak resets after firing so it can't double-fire on the next failure.
+	if final.failStreak != 0 || final.failKey != "" {
+		t.Fatalf("nudge must reset failKey/failStreak, got key=%q streak=%d", final.failKey, final.failStreak)
 	}
-	scroll := stripANSI(om.scroll.String())
-	if !strings.Contains(scroll, "bash") || !strings.Contains(scroll, "repeated 3×") {
-		t.Fatalf("scrollback missing S2 yield notice: %q", scroll)
+}
+
+// recordAndNudge is a test-only driver that replays the body of Update's
+// toolResultMsg case for the "queue drained" branch: record the outcome, then
+// (since nothing is pending) consider the failure nudge. It lets the streak
+// tests exercise the real recordToolOutcome + maybeFailureNudge logic without
+// threading a live SSE turn per iteration.
+func (m Model) recordAndNudge(result chmctx.Message) (tea.Model, tea.Cmd) {
+	m.history = append(m.history, result)
+	m.recordToolOutcome(result.ToolName, result.Content)
+	m.maybeFailureNudge()
+	return m, nil
+}
+
+// TestRepeatedFailureNudgeSuccessResetsStreak: a single success in the middle
+// of a run of failures resets the streak, so the nudge never fires.
+func TestRepeatedFailureNudgeSuccessResetsStreak(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.lastToolKey = tools.BashName + "|make build"
+	fail := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.BashName, Content: "x\n(exit: exit status 1)"}
+	ok := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.BashName, Content: "all green"}
+
+	var mm tea.Model = m
+	// 4 failures, then one success, then 4 more failures — never 5 in a row.
+	for i := 0; i < 4; i++ {
+		out, _ := mm.(Model).recordAndNudge(fail)
+		mm = out
 	}
-	select {
-	case <-ctx.Done():
-	default:
-		t.Fatal("underlying context was not cancelled by S2 yield")
+	out, _ := mm.(Model).recordAndNudge(ok)
+	mm = out
+	for i := 0; i < 4; i++ {
+		out, _ := mm.(Model).recordAndNudge(fail)
+		mm = out
+	}
+	final := mm.(Model)
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleSystem {
+			t.Fatalf("a success in the middle must prevent the nudge, but one fired:\n%+v", final.history)
+		}
+	}
+}
+
+// TestRepeatedFailureNudgeDifferentTargetResetsStreak: switching targets
+// between failures resets the streak — exploration across distinct operations
+// must not trip the nudge.
+func TestRepeatedFailureNudgeDifferentTargetResetsStreak(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	fail := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.BashName, Content: "x\n(exit: exit status 1)"}
+
+	var mm tea.Model = m
+	// Each iteration fails, but against a different bash target, so the streak
+	// keeps resetting to 1 and never reaches maxToolFailStreak.
+	for i := 0; i < maxToolFailStreak+2; i++ {
+		cur := mm.(Model)
+		cur.lastToolKey = fmt.Sprintf("%s|echo %d", tools.BashName, i)
+		out, _ := cur.recordAndNudge(fail)
+		mm = out
+	}
+	final := mm.(Model)
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleSystem {
+			t.Fatalf("distinct targets must not trip the nudge, but one fired:\n%+v", final.history)
+		}
+	}
+	if final.failStreak != 1 {
+		t.Fatalf("after distinct-target failures the streak should sit at 1, got %d", final.failStreak)
+	}
+}
+
+// TestSubmitResetsFailureStreak: a fresh user submission is a new goal, so a
+// stale streak from the previous goal must not carry over and trip the nudge
+// early. submit's non-slash path zeroes failKey/failStreak.
+func TestSubmitResetsFailureStreak(t *testing.T) {
+	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	m.failKey = tools.BashName + "|make build"
+	m.failStreak = maxToolFailStreak - 1 // one away from firing
+	mm, _ := m.submit("new goal", "new goal", promptEntry{display: "new goal"})
+	final := mm.(Model)
+	if final.failStreak != 0 || final.failKey != "" {
+		t.Fatalf("submit must reset the failure streak for a new goal, got key=%q streak=%d",
+			final.failKey, final.failStreak)
+	}
+}
+
+// TestClearResetsFailureStreak: /clear starts the conversation over, including
+// the repeated-failure backstop's counters.
+func TestClearResetsFailureStreak(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.failKey = tools.BashName + "|make build"
+	m.failStreak = maxToolFailStreak - 1
+	out, _ := m.runSlash("/clear")
+	final := out.(Model)
+	if final.failStreak != 0 || final.failKey != "" {
+		t.Fatalf("/clear must reset the failure streak, got key=%q streak=%d",
+			final.failKey, final.failStreak)
 	}
 }
 
@@ -1998,20 +2020,21 @@ func TestHandleStreamDrainsAfterCancel(t *testing.T) {
 
 // TestHandleStreamClosedSkipsAdvanceAfterCancel: Ctrl+C during a turn
 // leaves phase=idle; the deferred streamClosedMsg must not auto-restart
-// a new turn (which would surprise the user with the loop re-nudging
-// itself after they asked to stop). gysd MissingStreak should also stay put.
+// a new turn (which would surprise the user with the agent re-entering chat
+// after they asked to stop). No history mutation either.
 func TestHandleStreamClosedSkipsAdvanceAfterCancel(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.phase = phaseIdle // handleCtrlC already finalised
-	m.gysd.MissingStreak = 1
+	m.history = []chmctx.Message{{Role: chmctx.RoleUser, Content: "earlier"}}
+	before := len(m.history)
 
 	out, cmd := m.handleStreamClosed()
 	om := out.(Model)
 	if cmd != nil {
 		t.Fatal("stale close after cancel must NOT return a new-turn Cmd")
 	}
-	if om.gysd.MissingStreak != 1 {
-		t.Fatalf("MissingStreak should not tick on stale close: got %d", om.gysd.MissingStreak)
+	if len(om.history) != before {
+		t.Fatalf("stale close after cancel must not mutate history, grew by %d", len(om.history)-before)
 	}
 }
 
@@ -2066,63 +2089,6 @@ func TestStaleStreamCloseDoesNotKillLiveTurn(t *testing.T) {
 	}
 	if om.cancel == nil {
 		t.Fatal("stale close cancelled the live turn's context")
-	}
-}
-
-// TestStaleVerifyResultDoesNotMutateNewTurn pins down the cross-turn race
-// where a verify subprocess from turn N completes after the user has Ctrl+C'd
-// AND submitted turn N+1. Without the turnCtx tag the late verifyResultMsg
-// would mutate the live turn's gysd.Session — bumping RedStreak from a stale
-// red, or worse poisoning the evidence pool with a stale green that would let
-// the model claim done in turn N+1 with quotes from turn N. The phase.active()
-// guard alone passes here because turn N+1 is genuinely active; only the
-// turnCtx mismatch can save us.
-func TestStaleVerifyResultDoesNotMutateNewTurn(t *testing.T) {
-	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-
-	// Turn N: spawn a verify under ctxN, then cancel.
-	_, cancelN := context.WithCancel(context.Background())
-	ctxN, cancelN2 := context.WithCancel(context.Background())
-	t.Cleanup(cancelN)
-	t.Cleanup(cancelN2)
-
-	// Turn N+1 is now live with a fresh ctx.
-	ctxLive, cancelLive := context.WithCancel(context.Background())
-	t.Cleanup(cancelLive)
-	m.turnCtx = ctxLive
-	m.cancel = cancelLive
-	m.phase = phaseThinking
-
-	// Stale RED verifyResultMsg from turn N (already cancelled).
-	stale := verifyResultMsg{
-		callID:   "v-stale",
-		callName: "verify",
-		command:  "pytest",
-		outcome:  gysd.RunOutcome{Output: "FAIL", ExitCode: 1},
-		turnCtx:  ctxN,
-	}
-	out, _ := m.applyVerifyResult(stale)
-	om := out.(Model)
-	if om.gysd.RedStreak != 0 {
-		t.Fatalf("stale red verify bumped live turn's RedStreak: %d", om.gysd.RedStreak)
-	}
-	if len(om.gysd.VerifyLog) != 0 {
-		t.Fatalf("stale verify polluted live turn's VerifyLog: %+v", om.gysd.VerifyLog)
-	}
-
-	// Stale GREEN verify — the dangerous one. If we recorded it, a `done` in
-	// turn N+1 quoting "passed in 0.34s" would succeed using turn N's evidence.
-	staleGreen := verifyResultMsg{
-		callID:   "v-stale-green",
-		callName: "verify",
-		command:  "pytest",
-		outcome:  gysd.RunOutcome{Output: "===== 1 passed in 0.34s =====", ExitCode: 0},
-		turnCtx:  ctxN,
-	}
-	out2, _ := om.applyVerifyResult(staleGreen)
-	om2 := out2.(Model)
-	if len(om2.gysd.VerifyLog) != 0 {
-		t.Fatalf("stale green verify entered evidence pool: %+v", om2.gysd.VerifyLog)
 	}
 }
 
@@ -2633,8 +2599,13 @@ func TestMultiToolCallRoundExecutesAllBeforeNextChat(t *testing.T) {
 			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		default:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c3","function":{"name":"ask","arguments":"{\"question\":\"both finished?\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":1}}`)
+			// Round 2 ends the turn the new way: a plain content reply with NO
+			// tool call. (Previously this emitted an `ask` loop tool to stop;
+			// with GYSD gone, "no tool call" is how a turn ends — and emitting a
+			// non-existent tool here would loop drain forever since runRaw would
+			// return "(unknown tool: ...)" and re-enter chat indefinitely.)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"both echoes finished"}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		}
 	})

@@ -1,5 +1,6 @@
-// Package tools holds the local executors (bash, write_file, edit_file) and
-// the tool-router that dispatches assistant tool calls to them by name.
+// Package tools holds the local executors (bash, read_file, write_file,
+// edit_file) and the tool-router that dispatches assistant tool calls to
+// them by name.
 package tools
 
 import (
@@ -15,12 +16,12 @@ import (
 )
 
 // Wire-format tool names. Centralised so the schema, the router switch, and
-// the inline-status switch can never drift apart. Mirrors the pattern in the
-// gysd package (gysd.ToolVerify etc.).
+// the inline-status switch can never drift apart.
 const (
 	BashName      = "bash"
 	WriteFileName = "write_file"
 	EditFileName  = "edit_file"
+	ReadFileName  = "read_file"
 )
 
 // maxBashTimeoutSeconds caps the per-call timeout the model can request via
@@ -50,6 +51,13 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctxT, "/bin/sh", "-c", command)
+	// Put the shell in its own process group and register a Cancel that kills
+	// the whole group on cancel/timeout (Unix; no-op on Windows). Salvaged
+	// from the deleted gysd verify-runner: bash is now the only shell tool, so
+	// it owns the tree-kill the verify path used to. Without it, backgrounded
+	// children (`cmd &`) outlive the parent shell on Ctrl+C or timeout and
+	// leak — a robustness gain over the old bash, which single-process-killed.
+	setProcessGroup(cmd)
 	// Bounds how long we wait for stdout/stderr pipes to close after /bin/sh
 	// exits. Without this, `cmd &` backgrounding leaks pipe fds to the
 	// grandchild and CombinedOutput blocks for the full timeout even though
@@ -70,8 +78,8 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 			// child (`cmd &`) still held the stdout/stderr pipes open past
 			// WaitDelay — the very pattern WaitDelay (above) exists to support,
 			// not a command failure. Return the output as-is so it isn't
-			// mislabeled with a spurious (exit: ...). Mirrors gysd.RunCommand's
-			// errors.As-gated exit handling.
+			// mislabeled with a spurious (exit: ...). Kept after the cancel and
+			// timeout checks so those signals win over a coincident WaitDelay.
 			return s
 		default:
 			// Exit errors surface as part of the output — exactly what the model needs.
@@ -81,8 +89,8 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	return s
 }
 
-// BashSchema is the OpenAI tool definition for bash — the single local tool
-// every profile exposes to the model.
+// BashSchema is the OpenAI tool definition for bash — the shell tool every
+// profile exposes to the model.
 func BashSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
@@ -144,6 +152,9 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 		oldString, _ := call.Arguments["old_string"].(string)
 		newString, _ := call.Arguments["new_string"].(string)
 		return EditFile(path, oldString, newString)
+	case ReadFileName:
+		path, _ := call.Arguments["path"].(string)
+		return ReadFile(path)
 	default:
 		return fmt.Sprintf("(unknown tool: %s)", call.Name)
 	}
@@ -161,6 +172,9 @@ func InlineStatus(call chmctx.ToolCall) string {
 	case EditFileName:
 		path, _ := call.Arguments["path"].(string)
 		return "▶ edit_file: " + path
+	case ReadFileName:
+		path, _ := call.Arguments["path"].(string)
+		return "▶ read_file: " + path
 	default:
 		// try to pluck a meaningful arg (first string value)
 		for _, v := range call.Arguments {
