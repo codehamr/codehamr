@@ -24,14 +24,11 @@ func TestBashNonZeroExitNotFatal(t *testing.T) {
 	}
 }
 
-// TestBashExactExitMarkerFormat pins the EXACT joined shape of a non-zero
-// exit (bash.go:78): the command's own output, then a single "\n(exit: ...)"
-// marker — no doubled marker, no missing separator. Every other bash test
-// only does strings.Contains("exit"), so a regression that dropped the
-// leading "\n" or duplicated the marker would pass silently even though the
-// model parses these markers. Doubles as the missing proof that real output
-// is preserved alongside the non-zero exit (TestBashNonZeroExitNotFatal uses
-// `false`, which emits nothing).
+// TestBashExactExitMarkerFormat pins the exact non-zero-exit shape: output,
+// then a single "\n(exit: ...)" marker. The model parses these, and the other
+// tests only Contains("exit") — a dropped "\n" or doubled marker would pass
+// silently. Also proves real output survives alongside the exit (the `false`
+// test emits nothing).
 func TestBashExactExitMarkerFormat(t *testing.T) {
 	out := Bash(context.Background(), "echo out; exit 3", 5*time.Second)
 	want := "out\n\n(exit: exit status 3)"
@@ -47,9 +44,8 @@ func TestBashEmptyCommand(t *testing.T) {
 }
 
 // TestBashHonorsAlreadyCancelledParent: a pre-cancelled parent (Ctrl+C raced
-// the dispatch goroutine) must report "(cancelled)" rather than "(empty
-// command)" or — worse — kicking off a fresh /bin/sh process. Without this
-// guard the cancel was effectively ignored on the empty-cmd fast path.
+// the dispatch) must report "(cancelled)", not "(empty command)" or — worse —
+// spawn a fresh /bin/sh. The cancel must win even on the empty-cmd fast path.
 func TestBashHonorsAlreadyCancelledParent(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -69,8 +65,7 @@ func TestBashTimeout(t *testing.T) {
 }
 
 func TestBashCustomTimeoutHonored(t *testing.T) {
-	// A timeout_seconds of 1 should truncate the 3 second sleep.
-	// Also verifies the argument flows through runRaw into Bash.
+	// timeout_seconds of 1 truncates the 3s sleep, and flows through to Bash.
 	start := time.Now()
 	call := chmctx.ToolCall{
 		ID: "t1", Name: "bash",
@@ -89,9 +84,8 @@ func TestBashCustomTimeoutHonored(t *testing.T) {
 }
 
 func TestBashTimeoutCappedAtOneHour(t *testing.T) {
-	// A request for 999999 seconds must be clamped to 3600. We cannot sleep
-	// an hour to prove it, so instead verify the call completes quickly with
-	// a short command (i.e. no overflow, no panic, honours the happy path).
+	// 999999s must clamp to 3600. Can't sleep an hour to prove it, so a short
+	// command just has to complete quickly — no overflow, no panic.
 	call := chmctx.ToolCall{
 		ID: "t2", Name: "bash",
 		Arguments: map[string]any{
@@ -105,12 +99,10 @@ func TestBashTimeoutCappedAtOneHour(t *testing.T) {
 	}
 }
 
-// TestBashTimeoutOverflowClamped: extreme float values must be clamped
-// BEFORE the Duration multiplication. `time.Duration(1e18) * time.Second`
-// overflows int64 and wraps to a negative deadline, which would make
-// context.WithTimeout fire instantly — the command would "succeed" in
-// negative time without actually running. Clamping up front avoids the
-// trap.
+// TestBashTimeoutOverflowClamped: extreme floats must be clamped BEFORE the
+// Duration multiply. `time.Duration(1e18) * time.Second` overflows int64 to a
+// negative deadline, firing context.WithTimeout instantly — the command would
+// "succeed" without running. Clamp up front to avoid it.
 func TestBashTimeoutOverflowClamped(t *testing.T) {
 	call := chmctx.ToolCall{
 		ID: "t3", Name: "bash",
@@ -125,10 +117,9 @@ func TestBashTimeoutOverflowClamped(t *testing.T) {
 	}
 }
 
-// TestBashParentCancelMidRun: when the parent context is cancelled while a
-// long sleep is in flight, Bash returns "(cancelled)" — not the misleading
-// "(timeout after Xs)" or a stale exit code. Mirrors the runner contract:
-// parent cancel always wins over timeout because it's the user's signal.
+// TestBashParentCancelMidRun: parent cancel mid-sleep returns "(cancelled)",
+// not a misleading "(timeout after Xs)" or stale exit code. Parent cancel
+// always wins over timeout — it's the user's signal.
 func TestBashParentCancelMidRun(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -150,9 +141,9 @@ func TestBashParentCancelMidRun(t *testing.T) {
 }
 
 func TestBashBackgroundedChildDoesNotBlock(t *testing.T) {
-	// A naked `cmd &` leaks the child's stdout/stderr pipes. Verify that we
-	// do not block on those pipes after /bin/sh has exited. This is what
-	// caused multi minute stalls in real sessions before WaitDelay was set.
+	// A naked `cmd &` leaves the child holding stdout/stderr pipes. We must not
+	// block on them after /bin/sh exits — that caused multi-minute stalls
+	// before WaitDelay was set.
 	start := time.Now()
 	Bash(context.Background(), "sleep 3 &", 5*time.Second)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
@@ -160,13 +151,10 @@ func TestBashBackgroundedChildDoesNotBlock(t *testing.T) {
 	}
 }
 
-// TestBashBackgroundedChildReturnsCleanOutput: a successful command that
-// backgrounds a child holding the stdout/stderr pipes open trips
-// exec.ErrWaitDelay (the shell already exited 0), NOT an exit error. It must
-// come back with its real output and no spurious "(exit: ...)" marker —
-// otherwise every `cmd &` / `server &` usage looks like a failure to the
-// model. Companion to TestBashBackgroundedChildDoesNotBlock, which only
-// asserts we don't block; this asserts the result isn't mislabeled.
+// TestBashBackgroundedChildReturnsCleanOutput: backgrounding a child that
+// holds the pipes open trips exec.ErrWaitDelay (shell already exited 0), not
+// an exit error. Result must carry real output and no spurious "(exit: ...)"
+// marker, else every `cmd &` / `server &` looks like a failure to the model.
 func TestBashBackgroundedChildReturnsCleanOutput(t *testing.T) {
 	out := Bash(context.Background(), "echo done && sleep 3 &", 10*time.Second)
 	if strings.Contains(out, "(exit:") {
@@ -215,13 +203,10 @@ func TestInlineStatusGeneric(t *testing.T) {
 	}
 }
 
-// TestInlineStatusRuneBoundaryTruncate pins down "byte 117 lands inside a
-// multi-byte rune" for a long non-ASCII command. The naive `s[:117]` cuts
-// the leading 'ä' UTF-8 sequence in half, leaving an orphan continuation
-// byte the TUI then tea.Println's to the terminal as invalid UTF-8.
-// Snapping the cut to the previous rune boundary keeps the inline status
-// line a valid UTF-8 string at the cost of a couple characters off the
-// 120-byte budget — well worth it.
+// TestInlineStatusRuneBoundaryTruncate: truncating a long non-ASCII command at
+// a fixed byte offset can split a multi-byte rune, leaving an orphan
+// continuation byte the TUI prints as invalid UTF-8. The cut must snap back to
+// a rune boundary, trading a couple chars off the byte budget for valid UTF-8.
 func TestInlineStatusRuneBoundaryTruncate(t *testing.T) {
 	cmd := strings.Repeat("ä", 100) + " end" // 200+ bytes of 2-byte runes
 	s := InlineStatus(chmctx.ToolCall{

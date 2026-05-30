@@ -2,11 +2,9 @@ package main
 
 import "testing"
 
-// TestIsLocalBuild pins down the contract: `go run` (version=="dev") and
-// dirty-tree installs (`v…-dirty`) are treated as local and must skip
-// self-update, otherwise an older release silently overwrites the
-// freshly-compiled binary carrying unreleased work. Clean semver tags
-// (goreleaser output) continue to self-update.
+// TestIsLocalBuild pins the contract: `go run` ("dev") and dirty-tree builds
+// are local and skip self-update — else an older release overwrites unreleased
+// work. Clean semver tags still self-update.
 func TestIsLocalBuild(t *testing.T) {
 	cases := []struct {
 		in   string

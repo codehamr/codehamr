@@ -21,13 +21,10 @@ func TestTokensHeuristic(t *testing.T) {
 	}
 }
 
-// TestMessageTokensCountsToolCallArguments pins the per-tool-call argument
-// accounting in Message.Tokens (ctx.go:41-43). Pack runs on history that
-// holds assistant messages whose ToolCalls carry parsed Arguments (built in
-// llm.toolSlot.resolve), so this map-iteration cost feeds the budget on every
-// tool-using turn — yet no other test populates Arguments. Asserting the
-// delta (rather than an absolute total) keeps it robust to the +8 per-message
-// overhead while still failing loudly if the Arguments loop is ever dropped.
+// TestMessageTokensCountsToolCallArguments pins ToolCall.Arguments accounting
+// in Message.Tokens — it feeds the budget on every tool-using turn, yet no
+// other test populates Arguments. Asserts the delta so the +8 per-message
+// overhead can't mask a dropped Arguments loop.
 func TestMessageTokensCountsToolCallArguments(t *testing.T) {
 	base := Message{Role: RoleAssistant, ToolCalls: []ToolCall{{Name: "bash"}}}.Tokens()
 	withArgs := Message{Role: RoleAssistant, ToolCalls: []ToolCall{
@@ -63,9 +60,8 @@ func TestTruncateLargeCollapses(t *testing.T) {
 	}
 }
 
-// TestTruncateSnapsToRuneBoundary: a payload of multi-byte runes (umlauts
-// here — 2 bytes each in UTF-8) must not be sliced mid-sequence by
-// Truncate's byte-offset cut. The output must remain valid UTF-8.
+// TestTruncateSnapsToRuneBoundary: Truncate's byte-offset cut must not slice
+// multi-byte runes mid-sequence — output stays valid UTF-8.
 func TestTruncateSnapsToRuneBoundary(t *testing.T) {
 	in := strings.Repeat("ä", 20000) // 2 bytes each, 40000 bytes total = 10000 tokens
 	out := Truncate(in)
@@ -86,10 +82,9 @@ func TestPackNewestFirstWhole(t *testing.T) {
 		{Role: RoleAssistant, Content: big},
 	}
 	r := Pack(history, 2500)
-	// Each message costs Tokens(4000 bytes)+8 = 1008. Budget 2500 keeps the
-	// newest (1008) then msg3 (used 2016 <= 2500) and breaks before msg2
-	// (3024 > 2500): the deterministic answer is exactly 2. The old {2,3}
-	// range tolerated a phantom off-by-one in the `used+cost > budget` break.
+	// Each message costs Tokens(4000 bytes)+8 = 1008. Budget 2500 keeps newest
+	// (1008) and msg3 (2016 <= 2500), breaks before msg2 (3024 > 2500) — so
+	// exactly 2, pinning the `used+cost > budget` break against off-by-one.
 	if r.Kept != 2 {
 		t.Fatalf("kept=%d want exactly 2", r.Kept)
 	}
@@ -114,10 +109,9 @@ func TestPackAlwaysKeepsNewest(t *testing.T) {
 	}
 }
 
-// TestPackDropsOrphanToolMessage: when budget-trimming cuts the assistant
-// whose tool_calls spawned a tool message, that orphaned tool message must
-// be dropped — otherwise OpenAI-compat servers 400 with "tool message
-// without preceding tool_calls".
+// TestPackDropsOrphanToolMessage: if budget-trimming cuts the assistant whose
+// tool_calls spawned a tool message, that orphan must be dropped — else
+// OpenAI-compat servers 400 with "tool message without preceding tool_calls".
 func TestPackDropsOrphanToolMessage(t *testing.T) {
 	fortyX := strings.Repeat("x", 40)
 	history := []Message{
@@ -125,9 +119,8 @@ func TestPackDropsOrphanToolMessage(t *testing.T) {
 		{Role: RoleTool, ToolCallID: "c1", Content: fortyX},
 		{Role: RoleAssistant, Content: "reply"},
 	}
-	// Budget tight enough to drop the first assistant but loose enough that
-	// the tool message would otherwise survive. Values tuned against the
-	// per-message +8 overhead in Message.Tokens().
+	// Tight enough to drop the first assistant, loose enough that the tool
+	// message would otherwise survive. Tuned against the +8 per-message overhead.
 	r := Pack(history, 30)
 	for _, m := range r.Messages {
 		if m.Role == RoleTool {
@@ -139,20 +132,17 @@ func TestPackDropsOrphanToolMessage(t *testing.T) {
 	}
 }
 
-// TestPackDropsEmptyIDToolMessages is the regression for "an assistant message
-// with an empty-ID tool_call lets every subsequent empty-ToolCallID tool
-// message ride past dropOrphanTools via seen[\"\"] = true". The OpenAI-compat
-// backends 400 on a bare tool message; an unidentifiable tool message can
-// never be paired so it must always be dropped, regardless of which
-// (possibly malformed) assistant came before.
+// TestPackDropsEmptyIDToolMessages: an empty-ID tool_call must not let
+// subsequent empty-ToolCallID tool messages ride through as "paired". An
+// unidentifiable tool message can never be paired, so it's always dropped —
+// else OpenAI-compat backends 400 on the bare tool message.
 func TestPackDropsEmptyIDToolMessages(t *testing.T) {
 	history := []Message{
-		// A malformed assistant whose tool_call id is missing — server bug.
+		// Malformed assistant with a missing tool_call id — server bug.
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "", Name: "bash"}}},
-		// First empty-ID tool message looks paired only because of seen[""]
-		// = true. It must be dropped anyway.
+		// Looks paired via the empty ID; must be dropped anyway.
 		{Role: RoleTool, ToolCallID: "", Content: "from empty1"},
-		// Second empty-ID is even more clearly orphan — nothing to pair with.
+		// Clearly orphan — nothing to pair with.
 		{Role: RoleTool, ToolCallID: "", Content: "TRULY ORPHAN"},
 		{Role: RoleAssistant, Content: "final"},
 	}
@@ -164,9 +154,8 @@ func TestPackDropsEmptyIDToolMessages(t *testing.T) {
 	}
 }
 
-// TestPackKeepsPairedToolMessage: when both the assistant and its tool
-// response fit in the budget, the pair stays intact — we must not regress
-// and drop healthy pairs.
+// TestPackKeepsPairedToolMessage: a healthy assistant+tool pair that fits the
+// budget stays intact — don't regress into dropping good pairs.
 func TestPackKeepsPairedToolMessage(t *testing.T) {
 	history := []Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "bash"}}},
@@ -180,9 +169,8 @@ func TestPackKeepsPairedToolMessage(t *testing.T) {
 }
 
 func TestBudget(t *testing.T) {
-	// Use the constants directly so a future tweak to FixedSystem /
-	// FixedTools doesn't trip a magic-number mismatch here without surfacing
-	// a real budgeting regression.
+	// Reference the constants directly so a future FixedSystem/FixedTools tweak
+	// doesn't trip a magic-number mismatch absent a real regression.
 	// 65k: ctxSize/8 = 8192, just above the 8k floor.
 	if got := Budget(65536); got != 65536-FixedSystem-FixedTools-8192 {
 		t.Fatalf("budget wrong at 65k: %d", got)
@@ -196,9 +184,8 @@ func TestBudget(t *testing.T) {
 	}
 }
 
-// TestResponseReserveScales pins the reserve curve: floor active until
-// ctxSize/8 crosses 8k, then linear. Spot checks the values referenced
-// in the docstring so a future "let's tweak the divisor" lands here loud.
+// TestResponseReserveScales pins the reserve curve: floored until ctxSize/8
+// crosses 8k, then linear. A divisor tweak lands here loud.
 func TestResponseReserveScales(t *testing.T) {
 	cases := []struct {
 		ctxSize int

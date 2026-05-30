@@ -7,13 +7,10 @@ import (
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
 
-// ReadFile returns the contents of path, truncated to the same 6k-token head+
-// tail budget as every other tool output (chmctx.Truncate). Robust file reads
-// without bash quoting / heredoc / `cat` games: the model gets exact bytes,
-// not a shell-mangled approximation. Matches the bash/write/edit convention —
-// filesystem errors come back as part of the output string (never a Go error
-// the caller unwraps), so the model sees a missing file the same way it sees a
-// non-zero bash exit and reacts.
+// ReadFile returns path's contents, truncated to the shared tool-output budget
+// (Truncate). The model gets exact bytes, not a shell-mangled approximation.
+// Per the bash/write/edit convention, filesystem errors come back in the output
+// string, never as a Go error — the model reacts to them like a non-zero exit.
 func ReadFile(path string) string {
 	if path == "" {
 		return "(empty path)"
@@ -25,10 +22,9 @@ func ReadFile(path string) string {
 	return chmctx.Truncate(string(raw))
 }
 
-// ReadFileSchema is the OpenAI tool definition for read_file — the fourth
-// local tool, sitting next to bash/write_file/edit_file. The description
-// nudges the model toward read_file over `cat` for reading source so it
-// stops piping files through the shell just to look at them.
+// ReadFileSchema is the OpenAI tool definition for read_file. The description
+// nudges the model toward read_file over `cat` so it stops piping source
+// through the shell just to look at it.
 func ReadFileSchema() map[string]any {
 	return map[string]any{
 		"type": "function",

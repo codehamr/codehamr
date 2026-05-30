@@ -13,15 +13,11 @@ import (
 	"time"
 )
 
-// TestBashKillsBackgroundedChildOnCancel re-creates the coverage that lived in
-// the deleted gysd/runner_test.go, now that bash owns the process-group kill
-// (setProcessGroup in bash_unix.go). A naked `cmd &` backgrounds a grandchild
-// that outlives /bin/sh; without the Setpgid + negative-PID SIGKILL on cancel,
-// that grandchild leaks and runs to completion after the user has Ctrl+C'd.
-// The test launches a long sleep in the background, captures its PID via a
-// file, cancels the parent context, then polls until syscall.Kill(pid, 0)
-// reports the process is gone (ESRCH). Deterministic and fast — it polls a
-// deadline rather than sleeping the full 30s.
+// TestBashKillsBackgroundedChildOnCancel proves bash's process-group kill
+// reaches backgrounded grandchildren. A naked `cmd &` outlives /bin/sh; without
+// setProcessGroup's Setpgid + negative-PID SIGKILL on cancel, it leaks and runs
+// to completion after Ctrl+C. Polls a deadline rather than sleeping the full
+// 30s, so it stays fast and deterministic.
 func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -29,9 +25,8 @@ func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		// `sleep 30 &` backgrounds the sleep; we record its PID and then `wait`
-		// so /bin/sh stays alive holding the group together until cancel kills
-		// the whole group.
+		// Record the backgrounded sleep's PID, then `wait` so /bin/sh stays alive
+		// holding the group together until cancel kills it.
 		Bash(parent, "sleep 30 & echo $! > "+pidFile+"; wait", 60*time.Second)
 		close(done)
 	}()
@@ -39,13 +34,13 @@ func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 	// Wait for the PID file to materialise (the child has started).
 	pid := waitForPID(t, pidFile)
 
-	// Sanity: the child is alive before we cancel — signal 0 just probes.
+	// Sanity: child alive before cancel — signal 0 just probes.
 	if err := syscall.Kill(pid, 0); err != nil {
 		t.Fatalf("backgrounded child %d should be alive before cancel: %v", pid, err)
 	}
 
-	// User Ctrl+C: cancel the parent context. setProcessGroup's Cancel hook
-	// should SIGKILL the whole group, taking the backgrounded sleep with it.
+	// Ctrl+C: setProcessGroup's Cancel hook SIGKILLs the whole group, taking the
+	// backgrounded sleep with it.
 	cancel()
 
 	// Bash should return promptly once the group is killed.
@@ -55,8 +50,8 @@ func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 		t.Fatal("Bash did not return within 10s after cancel — group kill failed")
 	}
 
-	// Poll until the child is reaped/gone. The kernel may take a beat to tear
-	// the group down, so poll a deadline rather than asserting once.
+	// Poll until the child is gone — the kernel may take a beat to tear the
+	// group down.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {

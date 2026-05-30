@@ -4,10 +4,8 @@ package tools
 
 import "os/exec"
 
-// setProcessGroup is a no-op on Windows. codehamr targets Linux/macOS dev
-// containers; the Windows build exists so cross-compile in CI doesn't fail,
-// but the bash tool relies on /bin/sh and POSIX process groups and is not
-// expected to function on a native Windows host. Default exec.CommandContext
-// cancellation (single-process kill) applies — adequate for a non-functional
-// cross-compile target. Mirrors the deleted gysd/runner_windows.go.
+// setProcessGroup is a no-op on Windows: the bash tool needs /bin/sh and POSIX
+// process groups, so it isn't expected to run on a native Windows host. This
+// build exists only to keep CI cross-compile green; default single-process
+// cancellation is fine for a non-functional target.
 func setProcessGroup(_ *exec.Cmd) {}

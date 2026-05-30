@@ -6,14 +6,12 @@ import (
 	"strings"
 )
 
-// EditFile performs a single-string-replace edit on path. old_string must
-// appear EXACTLY ONCE in the file; otherwise the file is left untouched and
-// an error string is returned so the model sees the failure and reacts —
-// same convention as bash exit codes and WriteFile errors.
+// EditFile replaces old_string with new_string in path. old_string must match
+// EXACTLY ONCE; otherwise the file is untouched and an error string is returned
+// so the model sees the failure and reacts — same convention as bash/WriteFile.
 //
-// Empty old_string is rejected: an empty match has no anchor, every position
-// matches. old_string == new_string is rejected as a no-op so the model
-// doesn't waste a turn on a non-edit.
+// Empty old_string is rejected (no anchor — every position matches);
+// old_string == new_string is rejected as a no-op turn-waster.
 func EditFile(path, oldString, newString string) string {
 	if path == "" {
 		return "(empty path)"
@@ -43,10 +41,9 @@ func EditFile(path, oldString, newString string) string {
 	return fmt.Sprintf("edited %s: -%d +%d bytes", path, len(oldString), len(newString))
 }
 
-// EditFileSchema is the OpenAI tool definition for edit_file — the third
-// local tool, sitting next to bash and write_file. Surgical single-anchor
-// replace; the description nudges the model toward edit_file for tweaks to
-// existing files so it stops rewriting whole 40 KB documents to fix a typo.
+// EditFileSchema is the OpenAI tool definition for edit_file. The description
+// steers the model toward edit_file over write_file for small changes so it
+// stops rewriting whole documents to fix a typo.
 func EditFileSchema() map[string]any {
 	return map[string]any{
 		"type": "function",

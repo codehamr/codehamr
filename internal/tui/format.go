@@ -10,8 +10,7 @@ import (
 )
 
 // humanTokens renders a token count compactly: `900 tok`, `1.2k tok`,
-// `42k tok`, `1.5M tok`. Trims a trailing `.0` so round multiples read
-// cleanly as `1k`, `10M`. Minimal, no external deps, one function.
+// `1.5M tok`. Trailing `.0` is trimmed so round multiples read as `1k`.
 func humanTokens(n int) string {
 	switch {
 	case n < 1000:
@@ -27,11 +26,9 @@ func compactFloat(f float64) string {
 	return strings.TrimSuffix(strconv.FormatFloat(f, 'f', 1, 64), ".0")
 }
 
-// humanDuration renders an elapsed duration compactly for the end-of-turn
-// banner: `0.8s`, `12.3s`, `6m 51s`, `1h 14m`. Sub-minute keeps one decimal
-// so quick turns stay informative; past a minute the decimal is dropped
-// because sub-second precision is noise once you're counting minutes.
-// Round values read as `1m` / `1h` rather than `1m 0s` / `1h 0m`.
+// humanDuration renders an elapsed duration compactly: `0.8s`, `6m 51s`,
+// `1h 14m`. Sub-minute keeps one decimal; past a minute it's dropped as
+// noise. Round values read as `1m` / `1h`, not `1m 0s` / `1h 0m`.
 func humanDuration(d time.Duration) string {
 	secs := d.Seconds()
 	if secs < 60 {
@@ -52,14 +49,10 @@ func humanDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", h, m)
 }
 
-// humanRate renders a tokens-per-second throughput for the end-of-turn
-// banner: `25 tok/s`, `5.3 tok/s`, `0.5 tok/s`. Returns "" when the
-// inputs are degenerate (no tokens or zero elapsed) so the caller can
-// omit the segment cleanly. Sub-10 tok/s keeps one decimal because
-// reasoning models often sit at 1.x tok/s where the decimal is the
-// only meaningful signal; past 10 tok/s the decimal is noise. The unit
-// mirrors the neighbouring `… tok` token counter so the status bar
-// speaks one vocabulary.
+// humanRate renders throughput: `25 tok/s`, `5.3 tok/s`. Returns "" on
+// degenerate input (no tokens or zero elapsed) so the caller omits the
+// segment. Sub-10 tok/s keeps one decimal — reasoning models sit at 1.x
+// where that decimal is the only signal; above 10 it's noise.
 func humanRate(tokens int, d time.Duration) string {
 	if tokens <= 0 || d <= 0 {
 		return ""
@@ -71,10 +64,9 @@ func humanRate(tokens int, d time.Duration) string {
 	return fmt.Sprintf("%.1f tok/s", r)
 }
 
-// backendLabel renders the "am I connected?" signal. Connected is the quiet
-// default — the profile name, bold, no colour. Disconnected switches to bold
-// yellow and appends a `!` marker so the state stays legible even on colour
-// stripped terminals.
+// backendLabel renders the connection signal. Connected: profile name, bold,
+// no colour. Disconnected: bold yellow plus a `!` marker, so the state stays
+// legible on colour-stripped terminals.
 func backendLabel(c *config.Config, connected bool) string {
 	if connected {
 		return styleBackendOK.Render(c.Active)
@@ -82,9 +74,8 @@ func backendLabel(c *config.Config, connected bool) string {
 	return styleBackendWarn.Render(c.Active + " !")
 }
 
-// humanInt formats a non-negative integer with thin commas so a context
-// window like 262144 reads as "262,144" rather than a wall of digits. Goal
-// is scannability in the activation line, nothing more.
+// humanInt formats a non-negative integer with commas so a context window
+// like 262144 reads as "262,144" rather than a wall of digits.
 func humanInt(n int) string {
 	s := strconv.Itoa(n)
 	if len(s) <= 3 {

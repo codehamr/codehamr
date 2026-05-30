@@ -1,6 +1,5 @@
 // Package tools holds the local executors (bash, read_file, write_file,
-// edit_file) and the tool-router that dispatches assistant tool calls to
-// them by name.
+// edit_file) and the router that dispatches assistant tool calls by name.
 package tools
 
 import (
@@ -15,8 +14,8 @@ import (
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
 
-// Wire-format tool names. Centralised so the schema, the router switch, and
-// the inline-status switch can never drift apart.
+// Wire-format tool names. One source so schema, router, and inline-status
+// switch can't drift apart.
 const (
 	BashName      = "bash"
 	WriteFileName = "write_file"
@@ -24,22 +23,18 @@ const (
 	ReadFileName  = "read_file"
 )
 
-// maxBashTimeoutSeconds caps the per-call timeout the model can request via
-// timeout_seconds. Backstop against runaway loops (`sleep 99999`,
-// `while true`) that would otherwise tie up the turn until Ctrl+C. Lifted
-// out of runRaw so it's discoverable next to the schema.
+// maxBashTimeoutSeconds caps the per-call timeout_seconds the model can
+// request — backstop against runaway loops (`sleep 99999`, `while true`)
+// that would otherwise tie up the turn until Ctrl+C.
 const maxBashTimeoutSeconds = 3600
 
-// Bash runs a single shell command through /bin/sh -c. Output (stdout +
-// stderr combined) is returned as a single string. Non-zero exit is not an
-// error — the model gets to see the failure and react.
+// Bash runs one shell command through /bin/sh -c and returns combined
+// stdout+stderr. Non-zero exit is not an error — the model sees the failure
+// and reacts.
 //
-// A pre-cancelled parent (Ctrl+C raced the dispatch goroutine) returns the
-// "(cancelled)" sentinel rather than the synthetic "(empty command)" path
-// when command is blank — otherwise a trivially-cancelled bash call would
-// look like a valid empty-args invocation and the resulting toolResultMsg
-// would still be appended to history; the toolResultMsg.turnCtx staleness
-// guard catches that downstream, but reporting cancel up front is clearer.
+// A pre-cancelled parent (Ctrl+C raced the dispatch) returns "(cancelled)"
+// before the blank-command check, so a trivially-cancelled call isn't
+// mistaken for a valid empty-args invocation.
 func Bash(parent context.Context, command string, timeout time.Duration) string {
 	if parent.Err() != nil {
 		return "(cancelled)"
@@ -51,17 +46,13 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctxT, "/bin/sh", "-c", command)
-	// Put the shell in its own process group and register a Cancel that kills
-	// the whole group on cancel/timeout (Unix; no-op on Windows). Salvaged
-	// from the deleted gysd verify-runner: bash is now the only shell tool, so
-	// it owns the tree-kill the verify path used to. Without it, backgrounded
-	// children (`cmd &`) outlive the parent shell on Ctrl+C or timeout and
-	// leak — a robustness gain over the old bash, which single-process-killed.
+	// Shell gets its own process group + a Cancel that kills the whole group
+	// on cancel/timeout (Unix; no-op on Windows). Without it, backgrounded
+	// children (`cmd &`) outlive the parent shell and leak.
 	setProcessGroup(cmd)
-	// Bounds how long we wait for stdout/stderr pipes to close after /bin/sh
-	// exits. Without this, `cmd &` backgrounding leaks pipe fds to the
-	// grandchild and CombinedOutput blocks for the full timeout even though
-	// the shell itself is already gone.
+	// Cap the wait for stdout/stderr pipes to close after /bin/sh exits.
+	// Backgrounded children inherit those pipe fds, so without this
+	// CombinedOutput blocks for the full timeout even though the shell is gone.
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.CombinedOutput()
 	s := string(out)
@@ -70,27 +61,23 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 		case ctxT.Err() == context.DeadlineExceeded:
 			return s + fmt.Sprintf("\n(timeout after %s)", timeout)
 		case parent.Err() == context.Canceled || ctxT.Err() == context.Canceled:
-			// Parent cancellation (user Ctrl+C) is a first-class signal —
-			// spell it out rather than leaking "signal: killed" noise.
+			// User Ctrl+C — name it rather than leak "signal: killed" noise.
 			return s + "\n(cancelled)"
 		case errors.Is(err, exec.ErrWaitDelay):
-			// The shell exited 0; err is non-nil only because a backgrounded
-			// child (`cmd &`) still held the stdout/stderr pipes open past
-			// WaitDelay — the very pattern WaitDelay (above) exists to support,
-			// not a command failure. Return the output as-is so it isn't
-			// mislabeled with a spurious (exit: ...). Kept after the cancel and
-			// timeout checks so those signals win over a coincident WaitDelay.
+			// Shell exited 0; err is non-nil only because a backgrounded child
+			// held the pipes past WaitDelay — not a failure. Return output as-is
+			// so it isn't mislabeled with a spurious (exit: ...). After the
+			// cancel/timeout cases so those signals win over a coincident delay.
 			return s
 		default:
-			// Exit errors surface as part of the output — exactly what the model needs.
+			// Exit errors go into the output — exactly what the model needs.
 			s += fmt.Sprintf("\n(exit: %v)", err)
 		}
 	}
 	return s
 }
 
-// BashSchema is the OpenAI tool definition for bash — the shell tool every
-// profile exposes to the model.
+// BashSchema is the OpenAI tool definition for bash, exposed by every profile.
 func BashSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
@@ -131,12 +118,10 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 	switch call.Name {
 	case BashName:
 		cmd, _ := call.Arguments["cmd"].(string)
-		// Default 2 minute timeout, overridable per call up to 1 hour via
-		// timeout_seconds. Clamp the integer seconds BEFORE the Duration
-		// multiplication: a float like 1e18 would overflow int64 on
-		// `* time.Second` and wrap to a negative duration; a fractional
-		// value like 0.5 would truncate to 0 and cancel before the shell
-		// runs. The schema declares `integer` so floor at 1.
+		// Default 2m, overridable per call up to 1h. Clamp seconds BEFORE the
+		// Duration multiply: 1e18 would overflow int64 into a negative duration,
+		// and 0.5 would truncate to 0 and cancel before the shell runs — so
+		// floor at 1.
 		timeout := 2 * time.Minute
 		if secs, ok := call.Arguments["timeout_seconds"].(float64); ok && secs > 0 {
 			secs = min(max(secs, 1), maxBashTimeoutSeconds)
@@ -160,7 +145,7 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 	}
 }
 
-// InlineStatus is the one-liner the TUI prints per tool call (spec §Tool Calls).
+// InlineStatus is the one-liner the TUI prints per tool call.
 func InlineStatus(call chmctx.ToolCall) string {
 	switch call.Name {
 	case BashName:
@@ -176,7 +161,7 @@ func InlineStatus(call chmctx.ToolCall) string {
 		path, _ := call.Arguments["path"].(string)
 		return "▶ read_file: " + path
 	default:
-		// try to pluck a meaningful arg (first string value)
+		// Fall back to the first non-empty string arg.
 		for _, v := range call.Arguments {
 			if s, ok := v.(string); ok && s != "" {
 				return fmt.Sprintf("▶ %s: %s", call.Name, firstLine(s))
@@ -191,10 +176,8 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	if len(s) > 120 {
-		// Snap the byte cut down to the previous rune boundary; without
-		// this a non-ASCII command (e.g. 'ä' = 2 bytes) would be cut
-		// mid-sequence and the tea.Println'd inline status would carry
-		// invalid UTF-8 to the terminal.
+		// Snap the cut back to a rune boundary, else a multi-byte char gets
+		// split and the printed status carries invalid UTF-8 to the terminal.
 		cut := 117
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--

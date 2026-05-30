@@ -36,15 +36,13 @@ func TestReadFileMissingFile(t *testing.T) {
 	}
 }
 
-// TestReadFileTruncatesOversizeContent: ReadFile routes its bytes through
-// chmctx.Truncate, the same 6k-token head+tail cap every tool output obeys.
-// A file past ToolOutputCap*4 bytes (~24 kB) must come back with the
-// truncation marker so the model knows to re-read a slice rather than trust a
-// silently-clipped blob. Mirrors the bash/write/edit truncation contract.
+// TestReadFileTruncatesOversizeContent: ReadFile obeys the same Truncate
+// head+tail cap as every other tool. Oversize content must carry the marker so
+// the model re-reads a slice rather than trusting a silently-clipped blob.
 func TestReadFileTruncatesOversizeContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.txt")
-	// > ToolOutputCap*4 bytes (6000*4 = 24000) so Truncate fires.
+	// Over ToolOutputCap*4 bytes so Truncate fires.
 	big := strings.Repeat("x", chmctx.ToolOutputCap*4+1000)
 	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
 		t.Fatal(err)

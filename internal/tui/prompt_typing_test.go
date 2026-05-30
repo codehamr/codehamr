@@ -8,13 +8,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// typeChars feeds each rune of s as a separate KeyMsg through model.Update
-// AND calls model.View() after each tick. Calling View() is non-cosmetic:
-// bubbles' viewport only populates its internal `lines` slice inside
-// View() (via SetContent), and YOffset is clamped against len(lines). A
-// test that batches all keys without rendering between them keeps
-// maxYOffset at 0 and never reproduces real-world scroll bugs. Real
-// bubbletea runs View() after every Update, so this helper mirrors that.
+// typeChars feeds each rune of s as a separate KeyMsg, rendering View()
+// after each — non-cosmetic: the viewport only populates its `lines` slice
+// (and thus its YOffset clamp) inside View(), so batching keys without it
+// keeps maxYOffset at 0 and never reproduces real scroll bugs. Mirrors
+// real bubbletea, which renders after every Update.
 func typeChars(model tea.Model, s string) tea.Model {
 	for _, r := range s {
 		out, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -24,17 +22,14 @@ func typeChars(model tea.Model, s string) tea.Model {
 	return model
 }
 
-// TestTypingPreservesEarlyContent: type a marker at the START of a long
-// line, then enough filler that the line wraps to multiple visual rows.
-// The marker MUST stay visible in the rendered textarea View.
+// TestTypingPreservesEarlyContent: a marker at the START of a line that
+// wraps to many rows must stay visible in the textarea View.
 //
-// Bug this guards against: bubbles/textarea calls repositionView at the
-// end of its Update, scrolling the internal viewport down whenever the
-// cursor crosses below the current Height. recomputeLayout in this
-// package grew Height *after* that scroll fired — leaving YOffset > 0
-// with the first wrap row (containing the marker) clipped off the top.
-// preGrowTextarea before the key reaches the textarea anchors the cursor
-// inside the viewport so repositionView never scrolls.
+// Guards a scroll bug: textarea's repositionView scrolls down when the
+// cursor crosses below its Height; recomputeLayout grew Height *after*
+// that scroll, leaving the marker's wrap row clipped off the top.
+// preGrowTextarea inflates first so the cursor stays in view and
+// repositionView never scrolls.
 func TestTypingPreservesEarlyContent(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	final := typeChars(tea.Model(m), "ZZZSTART"+strings.Repeat("a", 300))
@@ -47,18 +42,15 @@ func TestTypingPreservesEarlyContent(t *testing.T) {
 	}
 }
 
-// TestTypingOverflowKeepsCursorVisible: when typed content overflows the
-// available textarea height (visualPromptLines > maxTextareaHeight), the
-// pre-grow inflate must NOT pin the viewport to the top — the cursor
-// would scroll off the bottom and the user would type blindly. In the
-// overflow case the textarea's natural bottom-anchored scroll is exactly
-// what we want, so verify the LAST char typed is visible (cursor row).
+// TestTypingOverflowKeepsCursorVisible: once content overflows
+// maxTextareaHeight, pre-grow must NOT pin the viewport to the top — that
+// would scroll the cursor off the bottom and the user types blind. The
+// natural bottom-anchored scroll is correct, so the LAST char must show.
 func TestTypingOverflowKeepsCursorVisible(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	// Force a small cap: height=10, minViewport=5, chrome=2 → maxTA=3.
 	out, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 10})
-	// Five distinct wrapped rows. ~90 chars per wrap at width 100 keeps
-	// the row count predictable for a width-aware reader.
+	// Five wrapped rows; ~90 chars per wrap at width 100 keeps the count predictable.
 	wide := strings.Repeat("a", 90)
 	body := "ROW0START" + wide + wide + wide + wide + "ROW4END"
 	final := typeChars(out, body)

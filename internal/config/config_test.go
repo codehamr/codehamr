@@ -7,12 +7,10 @@ import (
 	"testing"
 )
 
-// TestBootstrapWritesSandboxHintHeader pins the free-form comment header
-// writeYAML re-prepends on every write (config.go:257-262). yaml.Marshal drops
-// comments, so this header is "the only place a hint reliably survives", and
-// the host.docker.internal line is the #1 first-run footgun for devcontainer/
-// WSL2 users. A refactor that switched to plain yaml.Marshal would silently
-// drop it with zero other test failing — this is that guard.
+// TestBootstrapWritesSandboxHintHeader pins the comment header writeYAML
+// re-prepends on every write. yaml.Marshal drops comments, so this is the only
+// place the host.docker.internal hint survives — the #1 first-run footgun for
+// devcontainer/WSL2 users. Guards against a switch to plain yaml.Marshal.
 func TestBootstrapWritesSandboxHintHeader(t *testing.T) {
 	dir := t.TempDir()
 	if _, created, err := Bootstrap(dir); err != nil || !created {
@@ -41,7 +39,7 @@ func TestBootstrapCreatesLayout(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, DirName, "config.yaml")); err != nil {
 		t.Errorf("missing config.yaml: %v", err)
 	}
-	// PROMPT_SYS lives in the embed — it must never touch disk.
+	// PROMPT_SYS is embedded — it must never touch disk.
 	if _, err := os.Stat(filepath.Join(dir, DirName, "PROMPT_SYS.md")); err == nil {
 		t.Errorf("embedded PROMPT_SYS.md must not be written to disk")
 	}
@@ -59,18 +57,17 @@ func TestBootstrapCreatesLayout(t *testing.T) {
 	if !ok {
 		t.Fatal("default should include a 'hamrpass' profile")
 	}
-	// hamrpass intentionally has ContextSize=0 — server-authoritative via
-	// X-Context-Window, kept out of config.yaml by omitempty + Coerce skip.
+	// hamrpass ContextSize=0 — server-authoritative via X-Context-Window,
+	// kept out of config.yaml by omitempty + Coerce skip.
 	if hp.URL != "https://codehamr.com" || hp.LLM != "hamrpass" || hp.Key != "" || hp.ContextSize != 0 {
 		t.Fatalf("default hamrpass profile mismatch: %+v", hp)
 	}
 }
 
-// TestBootstrapHamrpassHasNoContextSizeOnDisk: a freshly bootstrapped
-// project's config.yaml must not contain a context_size line for the
-// hamrpass profile — that field is server-authoritative via the
-// X-Context-Window response header. The omitempty yaml tag plus the
-// IsCloudProfile skip in the Coerce loop guarantee this.
+// TestBootstrapHamrpassHasNoContextSizeOnDisk: a fresh config.yaml must carry
+// no context_size for hamrpass — that field is server-authoritative via
+// X-Context-Window. Guaranteed by the omitempty tag plus the IsCloudProfile
+// skip in the Coerce loop.
 func TestBootstrapHamrpassHasNoContextSizeOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	if _, _, err := Bootstrap(dir); err != nil {
@@ -80,12 +77,9 @@ func TestBootstrapHamrpassHasNoContextSizeOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Locate the hamrpass block by name and walk its scalar children,
-	// asserting context_size is not among them. Cheap line scan rather
-	// than a full YAML re-decode — the goal is "is the literal field
-	// gone from disk", which is exactly what omitempty controls.
-	// gopkg.in/yaml.v3 uses a 4-space indent by default; the children
-	// of a profile sit at 8 spaces, the next sibling profile at 4.
+	// Line scan, not a YAML re-decode: the question is whether the literal
+	// field is gone from disk, which is what omitempty controls. yaml.v3's
+	// 4-space indent puts a profile's children at 8 spaces, siblings at 4.
 	lines := strings.Split(string(raw), "\n")
 	in := false
 	for i, line := range lines {
@@ -107,11 +101,10 @@ func TestBootstrapHamrpassHasNoContextSizeOnDisk(t *testing.T) {
 	}
 }
 
-// TestBootstrapDoesNotRestoreDeletedHamrpass: once config.yaml exists,
-// the user owns its profile list. A removed hamrpass entry stays gone
-// across restarts (re-creation only happens via /hamrpass), and the
-// on-disk file is not silently rewritten. User customisations on other
-// profiles round-trip untouched.
+// TestBootstrapDoesNotRestoreDeletedHamrpass: once config.yaml exists the user
+// owns its profile list. A removed hamrpass stays gone across restarts
+// (re-created only via /hamrpass), the file is not silently rewritten, and
+// other profiles' customisations round-trip untouched.
 func TestBootstrapDoesNotRestoreDeletedHamrpass(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -156,8 +149,8 @@ models:
 	if cfg.Models["custom"].Key != "sk-keep" {
 		t.Fatalf("custom profile was mutated: %+v", cfg.Models["custom"])
 	}
-	// No spurious rewrite of config.yaml — Bootstrap's only job here is
-	// to read, not to "tidy". mtime is the cheapest signal.
+	// No spurious rewrite — Bootstrap's job here is to read, not tidy.
+	// mtime is the cheapest signal.
 	afterStat, err := os.Stat(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -167,10 +160,9 @@ models:
 	}
 }
 
-// TestBootstrapDoesNotRestoreRenamedLocal: a user who renames `local` to
-// e.g. `ollama` must not see a fresh `local` reappear as a duplicate on
-// the next start. Same invariant as the deleted-hamrpass case, exercised
-// for the other managed profile.
+// TestBootstrapDoesNotRestoreRenamedLocal: renaming `local` (e.g. to `ollama`)
+// must not resurrect a duplicate `local` on next start. Same invariant as the
+// deleted-hamrpass case, for the other managed profile.
 func TestBootstrapDoesNotRestoreRenamedLocal(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -203,10 +195,9 @@ models:
 	}
 }
 
-// TestEnsureHamrpassLazyCreates: when the user has hidden hamrpass from
-// config.yaml, EnsureHamrpass returns a profile populated from the
-// canonical seed values. Idempotent — calling twice returns the same
-// pointer.
+// TestEnsureHamrpassLazyCreates: with hamrpass hidden from config.yaml,
+// EnsureHamrpass returns a profile from the canonical seed values, and is
+// idempotent — twice returns the same pointer.
 func TestEnsureHamrpassLazyCreates(t *testing.T) {
 	cfg := &Config{
 		Active: "local",
@@ -230,10 +221,9 @@ func TestEnsureHamrpassLazyCreates(t *testing.T) {
 	}
 }
 
-// TestBootstrapPreservesExistingHamrpassKey: a user-supplied key on the
-// hamrpass entry must round-trip untouched. Trivially true now that
-// Bootstrap doesn't mutate existing entries at all, but kept as a
-// regression guard against any future "tidy on read" temptation.
+// TestBootstrapPreservesExistingHamrpassKey: a user-supplied hamrpass key must
+// round-trip untouched. Guards against any future "tidy on read" that would
+// mutate existing entries.
 func TestBootstrapPreservesExistingHamrpassKey(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -265,8 +255,8 @@ models:
 	}
 }
 
-// TestBootstrapLoadsMultipleProfiles: a user-authored config with two
-// profiles round-trips and Bootstrap picks the declared `active`.
+// TestBootstrapLoadsMultipleProfiles: a two-profile config round-trips and
+// Bootstrap picks the declared `active`.
 func TestBootstrapLoadsMultipleProfiles(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -296,8 +286,7 @@ models:
 	if cfg.Active != "work" {
 		t.Fatalf("Active = %q, want work", cfg.Active)
 	}
-	// User-authored config defines exactly these two profiles. Bootstrap
-	// must not silently inject local/hamrpass on top.
+	// Bootstrap must not inject local/hamrpass on top of the declared profiles.
 	if len(cfg.Models) != 2 {
 		t.Fatalf("expected exactly the two declared profiles, got %d: %+v", len(cfg.Models), cfg.Models)
 	}
@@ -312,11 +301,9 @@ models:
 	}
 }
 
-// TestConfigFilePermissionsAreOwnerOnly is the regression for "hamrpass key
-// is world-readable". Once a user runs /hamrpass <key>, config.yaml stores
-// the bearer token in plaintext — anyone with shell access on the same
-// machine could `cat` it. The fresh-bootstrap and post-Save paths must
-// both write 0o600.
+// TestConfigFilePermissionsAreOwnerOnly is the regression for a world-readable
+// hamrpass key: /hamrpass stores the bearer token in plaintext, so any local
+// user could cat it. Fresh-bootstrap and post-Save paths must both write 0o600.
 func TestConfigFilePermissionsAreOwnerOnly(t *testing.T) {
 	dir := t.TempDir()
 	cfg, _, err := Bootstrap(dir)
@@ -332,8 +319,8 @@ func TestConfigFilePermissionsAreOwnerOnly(t *testing.T) {
 		t.Fatalf("fresh config.yaml perms = %v, want 0o600 (key may leak to other local users)", got)
 	}
 
-	// Save() must keep the same permissions; otherwise a /hamrpass write
-	// would silently widen them after the user pasted a key.
+	// Save() must keep 0o600; otherwise a /hamrpass write would widen perms
+	// right after the user pasted a key.
 	cfg.Models["hamrpass"].Key = "hp-secret-12345678"
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
@@ -346,9 +333,8 @@ func TestConfigFilePermissionsAreOwnerOnly(t *testing.T) {
 		t.Fatalf("Save() widened config.yaml perms to %v (must stay 0o600)", got)
 	}
 
-	// The .codehamr/ directory itself shouldn't be world-listable either —
-	// even if config.yaml is 0o600, world-listable parents leak the
-	// hamrpass key's existence and let other users probe for it.
+	// The .codehamr/ dir mustn't be world-listable either: even with a 0o600
+	// config.yaml, a listable parent leaks the key's existence and invites probing.
 	parentSt, err := os.Stat(filepath.Join(dir, DirName))
 	if err != nil {
 		t.Fatal(err)
@@ -390,13 +376,11 @@ func TestSetActiveRejectsUnknown(t *testing.T) {
 	}
 }
 
-// TestSetActiveRevertsOnSaveFailure pins down the in-memory/on-disk drift
-// when Save() fails. The naive implementation mutates c.Active first and
-// returns the Save error second, so a subsequent ActiveProfile() reads the
-// wrong endpoint while config.yaml still names the previous profile — on
-// restart Bootstrap reads the file and the user's "switch" silently undoes
-// itself. SetActive must roll back its in-memory mutation when Save fails
-// so the in-memory and on-disk views stay in lockstep.
+// TestSetActiveRevertsOnSaveFailure guards in-memory/on-disk drift on Save
+// failure. If SetActive mutates Active before a failed Save, ActiveProfile()
+// reads the wrong endpoint while config.yaml still names the old profile, and
+// restart silently undoes the switch. SetActive must roll back on Save failure
+// so both views stay in lockstep.
 func TestSetActiveRevertsOnSaveFailure(t *testing.T) {
 	cfg := &Config{
 		Active: "a",
@@ -429,9 +413,8 @@ func TestActiveProfileResolvesByName(t *testing.T) {
 	}
 }
 
-// TestBootstrapCoercesUnknownActive: an unknown `active:` in config.yaml is
-// coerced to the first profile in sorted order so the runtime never hits a
-// nil ActiveProfile.
+// TestBootstrapCoercesUnknownActive: an unknown `active:` is coerced to the
+// first profile in sorted order so ActiveProfile never returns nil.
 func TestBootstrapCoercesUnknownActive(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -463,10 +446,9 @@ models:
 	}
 }
 
-// TestBootstrapRejectsEmptyModels: a config.yaml with an empty `models:`
-// block has nothing for Active to point at; Bootstrap must error out with
-// a readable message rather than panic in the Active coercer. The user
-// is told exactly how to recover (add a profile or delete the file).
+// TestBootstrapRejectsEmptyModels: an empty `models:` block leaves Active
+// nothing to point at; Bootstrap must error readably (how to recover) rather
+// than panic in the Active coercer.
 func TestBootstrapRejectsEmptyModels(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -503,9 +485,8 @@ func TestStrictYAMLRejectsUnknownKey(t *testing.T) {
 	}
 }
 
-// TestBootstrapCoercesBogusContextSize: context_size of 0 (or missing) must
-// be coerced to the default rather than silently degrading Pack() to
-// "newest message only".
+// TestBootstrapCoercesBogusContextSize: context_size 0 (or missing) is coerced
+// to the default rather than degrading Pack() to "newest message only".
 func TestBootstrapCoercesBogusContextSize(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -533,10 +514,9 @@ models:
 	}
 }
 
-// TestBootstrapRejectsNilProfile: `models: { local: ~ }` in YAML decodes to
-// a nil *Profile entry; the ContextSize coercion loop would panic on the
-// dereference. Bootstrap must reject the config with a readable error
-// instead of a runtime stack trace.
+// TestBootstrapRejectsNilProfile: `models: { local: ~ }` decodes to a nil
+// *Profile the ContextSize coercion loop would deref-panic on. Bootstrap must
+// reject it with a readable error instead.
 func TestBootstrapRejectsNilProfile(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -556,13 +536,11 @@ func TestBootstrapRejectsNilProfile(t *testing.T) {
 	}
 }
 
-// TestBootstrapRefusesSymlinkedDir is the regression for "co-tenant on a
-// shared host plants .codehamr → /tmp/attacker before the user's first run,
-// and codehamr happily uses it". Bootstrap must Lstat (not Stat) and refuse
-// any symlink: even though the resulting config.yaml mode is 0o600, the
-// attacker controls the *parent* directory and can swap or read whatever
-// codehamr writes there. The same defence applies to a planted config.yaml
-// symlink.
+// TestBootstrapRefusesSymlinkedDir: a co-tenant could plant .codehamr → an
+// attacker-controlled dir before first run. Bootstrap must Lstat (not Stat) and
+// refuse any symlink — even with a 0o600 config.yaml, the attacker owns the
+// parent and can swap or read what codehamr writes. Same defence for a planted
+// config.yaml symlink.
 func TestBootstrapRefusesSymlinkedDir(t *testing.T) {
 	root := t.TempDir()
 	target := t.TempDir()
@@ -577,8 +555,7 @@ func TestBootstrapRefusesSymlinkedDir(t *testing.T) {
 	if !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("error should name the symlink defence: %v", err)
 	}
-	// The target must remain untouched — no config.yaml dropped into the
-	// attacker-controlled directory.
+	// Target must stay untouched — nothing dropped into the attacker-controlled dir.
 	if _, err := os.Stat(filepath.Join(target, "config.yaml")); err == nil {
 		t.Fatal("Bootstrap wrote into the symlink target despite the rejection")
 	}
@@ -590,7 +567,7 @@ func TestBootstrapRefusesSymlinkedConfigYAML(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Plant config.yaml as a symlink pointing somewhere outside the project.
+	// Plant config.yaml as a symlink pointing outside the project.
 	target := filepath.Join(t.TempDir(), "external.yaml")
 	cfgPath := filepath.Join(dir, "config.yaml")
 	if err := os.Symlink(target, cfgPath); err != nil {
@@ -600,7 +577,7 @@ func TestBootstrapRefusesSymlinkedConfigYAML(t *testing.T) {
 	if err == nil {
 		t.Fatal("Bootstrap accepted a symlinked config.yaml")
 	}
-	// Attacker-controlled target must not have been clobbered with the seed.
+	// Attacker target must not be clobbered with the seed.
 	if _, err := os.Stat(target); err == nil {
 		t.Fatal("Bootstrap wrote through the config.yaml symlink — seed bytes landed at attacker target")
 	}
@@ -617,10 +594,9 @@ func TestBootstrapRefusesNonDirectoryAtCodehamrPath(t *testing.T) {
 	}
 }
 
-// TestURLOverrideDoesNotPersist: a CODEHAMR_URL style override lives in
-// cfg.URLOverride, ActiveURL reflects it, but Save writes only the
-// on-disk URL so re-bootstrapping without the env var restores the
-// original endpoint.
+// TestURLOverrideDoesNotPersist: a CODEHAMR_URL override lives in
+// cfg.URLOverride and ActiveURL reflects it, but Save writes only the stored
+// URL, so re-bootstrapping without the env var restores the original endpoint.
 func TestURLOverrideDoesNotPersist(t *testing.T) {
 	dir := t.TempDir()
 	cfg, _, err := Bootstrap(dir)
@@ -650,13 +626,11 @@ func TestURLOverrideDoesNotPersist(t *testing.T) {
 	}
 }
 
-// TestSaveTightensPreexistingLoosePerms is the regression for the upgrade
-// path the fresh-bootstrap test misses: a config.yaml left behind by an
-// older world-readable-default codehamr (or a hand-edit) starts at 0o644.
-// os.WriteFile preserves an existing file's mode, so Save() would rewrite
-// the bytes — including a freshly-pasted hamrpass bearer token — while
-// leaving the file world-readable. Save must tighten perms to 0o600 even
-// for a pre-existing loose file.
+// TestSaveTightensPreexistingLoosePerms covers the upgrade path fresh-bootstrap
+// misses: a config.yaml from an older world-readable codehamr (or a hand-edit)
+// starts at 0o644, and os.WriteFile preserves an existing file's mode — so Save
+// would rewrite the bytes (including a fresh hamrpass token) while leaving it
+// world-readable. Save must tighten a pre-existing loose file to 0o600.
 func TestSaveTightensPreexistingLoosePerms(t *testing.T) {
 	dir := t.TempDir()
 	cdir := filepath.Join(dir, DirName)
@@ -664,7 +638,7 @@ func TestSaveTightensPreexistingLoosePerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := filepath.Join(cdir, "config.yaml")
-	// Simulate the world-readable file an older codehamr would have written.
+	// World-readable file an older codehamr would have written.
 	loose := []byte("active: local\nmodels:\n  local:\n    llm: m\n    url: http://x\n    key: \"\"\n    context_size: 1\n")
 	if err := os.WriteFile(cfgPath, loose, 0o644); err != nil {
 		t.Fatal(err)

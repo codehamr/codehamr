@@ -7,22 +7,17 @@ import (
 	"syscall"
 )
 
-// setProcessGroup puts the shell in its own process group via Setpgid and
-// installs a Cancel that kills the whole group with SIGKILL. Without this,
-// backgrounded children (`cmd &`) survive parent shell exit on cancel or
-// timeout — exactly the leak we set out to prevent. Salvaged from the deleted
-// gysd/runner_unix.go when the verify tool was removed and the kill semantics
-// folded into the one remaining shell tool. Unix-only because
-// SysProcAttr.Setpgid and syscall.Kill negative-PID are not portable;
-// Windows uses bash_windows.go.
+// setProcessGroup gives the shell its own process group and a Cancel that
+// SIGKILLs the whole group. Without it, backgrounded children (`cmd &`) outlive
+// the shell on cancel or timeout — the leak we prevent. Unix-only: Setpgid and
+// negative-PID Kill aren't portable (Windows has its own build).
 func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		// Negative pid = the whole process group (Setpgid above made the
-		// shell its own group leader).
+		// Negative pid targets the whole group (shell is the leader).
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }

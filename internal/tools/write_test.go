@@ -45,12 +45,10 @@ func TestWriteFileEmptyPath(t *testing.T) {
 	}
 }
 
-// TestWriteFileMkdirErrorWhenParentIsFile exercises the (mkdir error) branch
-// (write.go:18-19): if a path component is a regular file, os.MkdirAll fails
-// and WriteFile must return the error as part of the output string (the bash
-// convention), never as a Go error. Triggered via "a file in the path" rather
-// than a read-only dir because tests run as root, and root bypasses directory
-// permission bits — a chmod-based negative test would false-pass.
+// TestWriteFileMkdirErrorWhenParentIsFile checks the (mkdir error) branch: a
+// MkdirAll failure must surface in the output string (bash convention), never
+// as a Go error. A file in the path triggers it; a read-only dir would not,
+// since tests run as root and root bypasses directory permission bits.
 func TestWriteFileMkdirErrorWhenParentIsFile(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "iam-a-file")
@@ -64,10 +62,9 @@ func TestWriteFileMkdirErrorWhenParentIsFile(t *testing.T) {
 	}
 }
 
-// TestWriteFileWriteErrorWhenTargetIsDir exercises the (write error) branch
-// (write.go:22-23): writing to a path that is itself an existing directory
-// fails at os.WriteFile, and the error must come back in the output string.
-// Root-safe trigger (a directory target), same reason as above.
+// TestWriteFileWriteErrorWhenTargetIsDir checks the (write error) branch:
+// writing to an existing directory fails at os.WriteFile, and the error must
+// come back in the output string. A directory target is root-safe, as above.
 func TestWriteFileWriteErrorWhenTargetIsDir(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "imadir")

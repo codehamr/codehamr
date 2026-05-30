@@ -8,10 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// newChippablePrompt returns a promptInput sized to a realistic width so the
-// underlying textarea's wrap/cursor math behaves like it does in the TUI.
-// Chip-related tests don't care about height; width matters because
-// SetCursor / LineInfo navigate through the wrapped grid.
+// newChippablePrompt returns a realistically-sized promptInput. Width matters —
+// cursor navigation walks the wrapped grid; height is irrelevant here.
 func newChippablePrompt() promptInput {
 	p := newPromptInput()
 	p.SetWidth(80)
@@ -19,9 +17,8 @@ func newChippablePrompt() promptInput {
 	return p
 }
 
-// pasteKey builds a bracketed-paste KeyMsg identical to what bubbletea emits
-// when the terminal reports a paste via the OSC sequence. Paste=true is the
-// flag promptInput keys off of in Update.
+// pasteKey builds the bracketed-paste KeyMsg bubbletea emits on paste.
+// Paste=true is the flag Update keys off of.
 func pasteKey(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s), Paste: true}
 }
@@ -35,8 +32,7 @@ func makePaste(n int) string {
 	return strings.Join(parts, "\n")
 }
 
-// TestSmallPasteStaysInline: a paste below the line threshold is handed to
-// the underlying textarea as-is — no chip created, value is the raw paste.
+// TestSmallPasteStaysInline: a paste below threshold stays raw — no chip.
 func TestSmallPasteStaysInline(t *testing.T) {
 	p := newChippablePrompt()
 	small := makePaste(3)
@@ -53,9 +49,8 @@ func TestSmallPasteStaysInline(t *testing.T) {
 	}
 }
 
-// TestLargePasteBecomesChip: a paste with ≥pasteChipMinLines lines collapses
-// into exactly one chip. DisplayValue shows the label, Value expands back to
-// the original content.
+// TestLargePasteBecomesChip: a ≥pasteChipMinLines paste collapses to one chip —
+// DisplayValue shows the label, Value expands back to the original.
 func TestLargePasteBecomesChip(t *testing.T) {
 	p := newChippablePrompt()
 	big := makePaste(pasteChipMinLines + 4)
@@ -73,19 +68,16 @@ func TestLargePasteBecomesChip(t *testing.T) {
 	}
 }
 
-// TestBackspaceAtChipEndRemovesWholeChip: cursor at the rune right after the
-// chip label, Backspace once, the whole label disappears and any
-// surrounding text stays intact.
+// TestBackspaceAtChipEndRemovesWholeChip: Backspace with the cursor right after
+// the label deletes the whole chip and leaves surrounding text intact.
 func TestBackspaceAtChipEndRemovesWholeChip(t *testing.T) {
 	p := newChippablePrompt()
-	// Type a prefix, paste big, type a suffix.
+	// Prefix, big paste, suffix.
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("before ")})
 	p, _ = p.Update(pasteKey(makePaste(10)))
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" after")})
 
-	// Move cursor to the very end of the chip label (before " after").
-	// Chip span starts at 7 ("before ") and is 23 runes long ("[Pasted text +10 lines]" = 23).
-	// Position cursor at span.end via Home + right-arrows.
+	// Cursor to the chip's trailing edge.
 	p.setCursorRuneOffset(p.spans[0].end)
 
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
@@ -97,8 +89,8 @@ func TestBackspaceAtChipEndRemovesWholeChip(t *testing.T) {
 	}
 }
 
-// TestDeleteAtChipStartRemovesWholeChip: cursor at the rune right before the
-// chip label, forward-Delete removes the whole chip.
+// TestDeleteAtChipStartRemovesWholeChip: forward-Delete with the cursor right
+// before the label removes the whole chip.
 func TestDeleteAtChipStartRemovesWholeChip(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("prefix")})
@@ -116,8 +108,8 @@ func TestDeleteAtChipStartRemovesWholeChip(t *testing.T) {
 	}
 }
 
-// TestLeftArrowAtChipEndJumpsToStart: ← at chip.end moves the cursor to
-// chip.start in one keystroke — cursor never visits interior positions.
+// TestLeftArrowAtChipEndJumpsToStart: ← jumps the cursor across the whole chip
+// in one keystroke — it never lands on interior positions.
 func TestLeftArrowAtChipEndJumpsToStart(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(9)))
@@ -139,8 +131,7 @@ func TestLeftArrowAtChipEndJumpsToStart(t *testing.T) {
 	}
 }
 
-// TestRightArrowAtChipStartJumpsToEnd: → at chip.start skips over the whole
-// chip in one keystroke.
+// TestRightArrowAtChipStartJumpsToEnd: → skips the whole chip in one keystroke.
 func TestRightArrowAtChipStartJumpsToEnd(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(9)))
@@ -158,9 +149,8 @@ func TestRightArrowAtChipStartJumpsToEnd(t *testing.T) {
 	}
 }
 
-// TestTwoChipsTrackedIndependently: two separate big pastes produce two
-// chips. Deleting the first leaves the second intact and its span shifts
-// left by the first's label length.
+// TestTwoChipsTrackedIndependently: two pastes make two chips; deleting the
+// first leaves the second intact with its span shifted left.
 func TestTwoChipsTrackedIndependently(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(8)))
@@ -174,7 +164,7 @@ func TestTwoChipsTrackedIndependently(t *testing.T) {
 		t.Fatal("chip spans must be sorted left-to-right")
 	}
 
-	// Delete the first chip via Backspace at its end.
+	// Delete the first chip.
 	p.setCursorRuneOffset(p.spans[0].end)
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 
@@ -191,8 +181,8 @@ func TestTwoChipsTrackedIndependently(t *testing.T) {
 	}
 }
 
-// TestValueExpandsAllChips: multi-chip Value() concatenates surrounding text
-// with full paste contents in the right order.
+// TestValueExpandsAllChips: Value() interleaves surrounding text with full
+// paste contents in order.
 func TestValueExpandsAllChips(t *testing.T) {
 	p := newChippablePrompt()
 	paste1 := makePaste(9)
@@ -209,8 +199,8 @@ func TestValueExpandsAllChips(t *testing.T) {
 	}
 }
 
-// TestTypingShiftsSpans: inserting a character before a chip shifts the
-// chip's span right by one; reconcile picks this up automatically.
+// TestTypingShiftsSpans: typing before a chip shifts its span right by one;
+// reconcile tracks it automatically.
 func TestTypingShiftsSpans(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(10)))
@@ -231,9 +221,8 @@ func TestTypingShiftsSpans(t *testing.T) {
 	}
 }
 
-// TestEntryRestoreRoundTrip: Entry() + Restore() fully recovers chip state —
-// same display text, same chip spans, same expanded Value(). Prompt history
-// uses this for ↑/↓ replay.
+// TestEntryRestoreRoundTrip: Entry()+Restore() fully recovers chip state —
+// display text, spans, expanded Value(). Backs ↑/↓ history replay.
 func TestEntryRestoreRoundTrip(t *testing.T) {
 	p := newChippablePrompt()
 	paste := makePaste(12)
@@ -245,7 +234,6 @@ func TestEntryRestoreRoundTrip(t *testing.T) {
 	wantDisplay := p.DisplayValue()
 	wantValue := p.Value()
 
-	// New prompt, restore.
 	q := newChippablePrompt()
 	q.Restore(entry)
 
@@ -260,8 +248,7 @@ func TestEntryRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-// TestResetClearsChips: after Reset the store and spans are empty so
-// subsequent Value()/DisplayValue() return just the new text.
+// TestResetClearsChips: Reset empties store and spans, leaving only new text.
 func TestResetClearsChips(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(10)))
@@ -277,9 +264,8 @@ func TestResetClearsChips(t *testing.T) {
 	}
 }
 
-// TestSetValueClearsChips: SetValue replaces with plain text and forgets any
-// prior chip. Used by slash-popover Tab-completion where chips can never be
-// part of the replacement.
+// TestSetValueClearsChips: SetValue installs plain text and drops prior chips —
+// used by slash-popover Tab-completion, where chips can't be part of a replacement.
 func TestSetValueClearsChips(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(10)))
@@ -292,16 +278,15 @@ func TestSetValueClearsChips(t *testing.T) {
 	}
 }
 
-// TestBackspaceNotAtChipBoundaryFallsThrough: Backspace away from any chip
-// boundary deletes one character normally and leaves the chip alone.
+// TestBackspaceNotAtChipBoundaryFallsThrough: Backspace away from a chip boundary
+// deletes one char normally, chip untouched.
 func TestBackspaceNotAtChipBoundaryFallsThrough(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
 	p, _ = p.Update(pasteKey(makePaste(9)))
-	// Cursor ends up at the very end, past the chip.
+	// Cursor ends past the chip; backspace must remove "X", not the chip.
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("X")})
-	// Now cursor is at end; backspace should remove the "X", NOT the chip.
 
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	if len(p.spans) != 1 {
@@ -312,16 +297,13 @@ func TestBackspaceNotAtChipBoundaryFallsThrough(t *testing.T) {
 	}
 }
 
-// TestPageKeysMoveCursorByHeight: PgUp / PgDn in a prompt large enough to
-// scroll internally should move the cursor by one prompt-height of lines —
-// bubbles/textarea's viewport keymap is empty, so without this the keys
-// are no-ops while mouse wheel (via the textarea's MouseMsg path) already
-// scrolls.
+// TestPageKeysMoveCursorByHeight: PgUp/PgDn move the cursor by one prompt-height
+// — bubbles/textarea ships an empty viewport keymap, so without our handling
+// these keys are no-ops (mouse wheel already scrolls via the MouseMsg path).
 func TestPageKeysMoveCursorByHeight(t *testing.T) {
 	p := newChippablePrompt()
-	// Fill the textarea with many logical rows. SetValue takes the whole
-	// value at once — cheaper than typing + Enter per line and avoids the
-	// chip-paste threshold entirely.
+	// Fill with many rows. SetValue installs all at once — avoids the chip
+	// threshold and per-line typing.
 	var b strings.Builder
 	for i := 0; i < 40; i++ {
 		fmt.Fprintf(&b, "row%02d\n", i)
@@ -333,8 +315,7 @@ func TestPageKeysMoveCursorByHeight(t *testing.T) {
 		t.Fatalf("precondition: cursor should be deep into the content, got row %d", startRow)
 	}
 
-	// PgUp should move the cursor up — the textarea's repositionView will
-	// scroll its internal viewport along with it.
+	// PgUp moves the cursor up; repositionView scrolls the viewport with it.
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 	if p.ta.Line() >= startRow {
 		t.Fatalf("PgUp should move cursor up from row %d, ended at %d",
@@ -349,13 +330,12 @@ func TestPageKeysMoveCursorByHeight(t *testing.T) {
 	}
 }
 
-// TestCarriageReturnLineEndings: terminals that send \r as a line separator
-// (old-mac-style, some VS Code setups under certain TERM settings) must
-// still get a correct line count in the chip label. bubbles/textarea only
-// splits on \n; we have to count line separators ourselves.
+// TestCarriageReturnLineEndings: lone-\r separators (old-mac-style, some VS Code
+// TERM setups) must still yield a correct chip line count. bubbles/textarea
+// splits only on \n, so we count separators ourselves.
 func TestCarriageReturnLineEndings(t *testing.T) {
 	p := newChippablePrompt()
-	// 10-line paste with \r separators only.
+	// 10-line paste, \r separators only.
 	paste := strings.Repeat("line\r", 9) + "end"
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
 
@@ -369,8 +349,7 @@ func TestCarriageReturnLineEndings(t *testing.T) {
 	}
 }
 
-// TestCRLFLineEndings: Windows-style \r\n separators count each logical
-// line once, not twice.
+// TestCRLFLineEndings: Windows \r\n counts each line once, not twice.
 func TestCRLFLineEndings(t *testing.T) {
 	p := newChippablePrompt()
 	paste := strings.Repeat("line\r\n", 9) + "end"
@@ -386,17 +365,15 @@ func TestCRLFLineEndings(t *testing.T) {
 	}
 }
 
-// TestPasteWithoutFlagButWithNewlineStillChips: some terminals don't set
-// the bracketed-paste flag even though bubbletea's rune collector delivers
-// multi-line content in one message (impossible for regular typing — the
-// collector breaks on \n). We accept those as pastes too so the feature
-// isn't silently dead on less-common terminals.
+// TestPasteWithoutFlagButWithNewlineStillChips: some terminals omit the
+// bracketed-paste flag, yet multi-line content in one KeyMsg can't come from
+// typing (the rune collector breaks on \n) — so we treat it as a paste anyway.
 func TestPasteWithoutFlagButWithNewlineStillChips(t *testing.T) {
 	p := newChippablePrompt()
 	msg := tea.KeyMsg{
 		Type:  tea.KeyRunes,
 		Runes: []rune(makePaste(10)),
-		Paste: false, // <- key point: no flag
+		Paste: false, // no flag
 	}
 	p, _ = p.Update(msg)
 	if len(p.spans) != 1 {
@@ -404,9 +381,9 @@ func TestPasteWithoutFlagButWithNewlineStillChips(t *testing.T) {
 	}
 }
 
-// TestLongSingleLinePasteChipsByCharCount: a 500-character single-line blob
-// has zero newlines but still deserves to collapse — line-count alone would
-// miss minified JSON and long stack-trace-on-one-line cases.
+// TestLongSingleLinePasteChipsByCharCount: a long single-line blob (zero
+// newlines) still collapses — char threshold catches minified JSON and
+// one-line stack traces that line-count alone would miss.
 func TestLongSingleLinePasteChipsByCharCount(t *testing.T) {
 	p := newChippablePrompt()
 	big := strings.Repeat("x", 500)
@@ -420,15 +397,13 @@ func TestLongSingleLinePasteChipsByCharCount(t *testing.T) {
 	}
 }
 
-// TestBackspaceImmediatelyAfterChipRemovesIt: regression guard for the
-// atomic semantics — user pastes, cursor lands right after chip, single
-// Backspace deletes the whole thing without needing to set cursor manually.
+// TestBackspaceImmediatelyAfterChipRemovesIt: atomic-delete regression guard —
+// after a paste the cursor sits at chip.end, so one Backspace deletes the chip
+// without any manual cursor setup.
 func TestBackspaceImmediatelyAfterChipRemovesIt(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(10)))
-	// InsertString leaves the cursor at the end of the inserted content —
-	// so cursor is exactly at chip.end. Backspace should trip the atomic
-	// path directly.
+	// InsertString leaves the cursor at chip.end, tripping the atomic path.
 	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 
 	if len(p.spans) != 0 {

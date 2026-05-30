@@ -8,10 +8,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// TestModelBracketedPasteCreatesChip: end-to-end — a bracketed-paste KeyMsg
-// dispatched through Model.Update must reach promptInput.Update and produce
-// a chip. Guards against a regression where the paste is swallowed by some
-// earlier handleKey branch.
+// TestModelBracketedPasteCreatesChip checks a bracketed-paste KeyMsg through
+// Model.Update reaches promptInput.Update and yields a chip — guarding against
+// an earlier handleKey branch swallowing the paste.
 func TestModelBracketedPasteCreatesChip(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	paste := strings.Repeat("x\n", 20) + "end"

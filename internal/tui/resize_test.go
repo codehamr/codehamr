@@ -11,11 +11,9 @@ import (
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
-// TestResizeKeepsPromptInsideTerminal: in inline mode View() renders only
-// the live region (optional streaming preview, popover, divider, prompt,
-// status bar). Across a resize sequence the View must never claim more
-// rows than the terminal — otherwise the textarea would push the status
-// bar past the bottom edge or wrap mid-prompt.
+// TestResizeKeepsPromptInsideTerminal: across a resize sequence View must
+// never claim more rows than the terminal, else the textarea pushes the
+// status bar off-screen or wraps mid-prompt.
 func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -41,11 +39,9 @@ func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 	}
 }
 
-// TestFirstResizeDoesNotClearScreen: on the very first WindowSizeMsg the
-// terminal still holds the user's shell output (and whatever else was on
-// screen before codehamr launched). Wiping it would feel destructive, so
-// the first resize never returns tea.ClearScreen — only the splash gets
-// printed into the outbox.
+// TestFirstResizeDoesNotClearScreen: the first WindowSizeMsg must not
+// ClearScreen — the terminal still holds the user's pre-launch shell
+// output; wiping it would feel destructive. Only the splash is printed.
 func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -56,12 +52,11 @@ func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 	}
 }
 
-// TestWidthChangeSuppressesView: any width change (narrow OR widen)
-// flips suppressView so the renderer's async ticker has nothing to
-// commit between SIGWINCH and the settle. View() must return "" while
-// suppressed; bubbletea's renderer expands that into one blank row +
-// EraseScreenBelow, leaving nothing for soft-wrap reflow to orphan.
-// Streaming buffer is preserved (re-wrapped on resume).
+// TestWidthChangeSuppressesView: any width change (narrow OR widen) flips
+// suppressView so nothing commits between SIGWINCH and the settle. View()
+// returns "" while suppressed; bubbletea expands that to one blank row +
+// EraseScreenBelow, leaving nothing for soft-wrap reflow to orphan. The
+// streaming buffer survives (re-wrapped on resume).
 func TestWidthChangeSuppressesView(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -94,23 +89,19 @@ func TestWidthChangeSuppressesView(t *testing.T) {
 	}
 }
 
-// TestResizeSettleReplaysScrollbackAtNewWidth: when the settle tick
-// matches, the model returns a strict tea.Sequence that wipes both
-// viewport and scrollback, re-emits the splash at the new width, and
-// replays the entire m.scroll transcript. After this every line in
-// scrollback was emitted at the current width — no previous-width
-// rows soft-wrap into stair-steps, and the splash always matches the
-// terminal layout.
+// TestResizeSettleReplaysScrollbackAtNewWidth: a matching settle returns a
+// tea.Sequence that wipes viewport + scrollback and re-emits splash and the
+// full m.scroll transcript at the new width — so no previous-width rows
+// soft-wrap into stair-steps.
 func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	// Seed some history into m.scroll so the settle has something to
-	// replay (mimics an earlier user submit + assistant response).
+	// Seed m.scroll so the settle has something to replay.
 	mx := mm.(Model)
-	mx.scroll.WriteString("▌ erkläre kurz bitcoin\nBitcoin ist eine digitale Währung.\n")
+	mx.scroll.WriteString("▌ explain bitcoin briefly\nBitcoin is a digital currency.\n")
 	mm = mx
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
@@ -134,18 +125,15 @@ func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 	if !cmdYieldsPrintln(settle) {
 		t.Error("settle must include at least one tea.Println — the splash and/or replayed scroll")
 	}
-	// Exactly two Println leaves: one for the splash, one for the
-	// transcript replay. (No outbox content was queued in this test.)
+	// Two Println leaves: splash + transcript replay (no outbox queued here).
 	if n := countPrintlnLeaves(settle); n != 2 {
 		t.Errorf("expected 2 tea.Println leaves (splash + scroll replay), got %d", n)
 	}
 }
 
-// TestStaleResizeSettleIsDiscarded: a settle msg whose gen no longer
-// matches m.resizeGen (because a newer resize bumped it after the tick
-// was scheduled) must be a complete no-op. Otherwise the chrome would
-// flicker back during a slow drag the moment the first tick fires,
-// then disappear again on the next narrowing.
+// TestStaleResizeSettleIsDiscarded: a settle whose gen no longer matches
+// m.resizeGen (a newer resize bumped it after scheduling) must be a no-op,
+// else the chrome flickers back mid-drag on each stale tick.
 func TestStaleResizeSettleIsDiscarded(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -172,10 +160,9 @@ func TestStaleResizeSettleIsDiscarded(t *testing.T) {
 	}
 }
 
-// TestRedundantResizeIsNoOp: when the terminal sends a WindowSizeMsg that
-// reports the same dimensions we already know about (some terminals do
-// this on focus events), the hardening path must not fire — clearing the
-// screen for a non-event would flicker the viewport for no benefit.
+// TestRedundantResizeIsNoOp: a WindowSizeMsg with unchanged dimensions
+// (some terminals send these on focus) must not fire the hardening path —
+// clearing the screen for a non-event flickers for no benefit.
 func TestRedundantResizeIsNoOp(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -189,10 +176,9 @@ func TestRedundantResizeIsNoOp(t *testing.T) {
 }
 
 // TestWidenResizeAlsoSuppresses: widening changes the splash layout
-// (text→art at the wordmark threshold) and may leave previous-narrow
-// rows looking out of place at the new width, so the same suppress +
-// settle replay path used for narrowing applies. The immediate cmd
-// is the debounce tick — the actual clear lands on settle.
+// (text→art at the wordmark threshold) and leaves narrow rows misplaced,
+// so it takes the same suppress + settle-replay path as narrowing. The
+// immediate cmd is the debounce tick; the clear lands on settle.
 func TestWidenResizeAlsoSuppresses(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -210,10 +196,9 @@ func TestWidenResizeAlsoSuppresses(t *testing.T) {
 	}
 }
 
-// TestHeightOnlyResizeDoesNotClear: changing the terminal height alone
-// (width stays the same) cannot induce the soft-wrap that breaks
-// bubbletea's cursor math, because no line gets wider than its own
-// container. The hardening path is reserved for width narrowing.
+// TestHeightOnlyResizeDoesNotClear: a height-only change can't induce the
+// soft-wrap that breaks bubbletea's cursor math (no line widens), so the
+// hardening path stays reserved for width narrowing.
 func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
@@ -226,10 +211,10 @@ func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 	}
 }
 
-// countCmdLeaves invokes cmd (and recurses into the []tea.Cmd payload
-// of tea.BatchMsg / tea.sequenceMsg, both unexported but slice-shaped)
-// and counts the leaves where match returns true. Used to assert
-// what a Sequence emits without importing bubbletea's internal types.
+// countCmdLeaves runs cmd, recurses into the slice-shaped []tea.Cmd payload
+// of tea.BatchMsg / tea.sequenceMsg (both unexported), and counts leaves
+// where match holds — asserting what a Sequence emits without importing
+// bubbletea's internal types.
 func countCmdLeaves(cmd tea.Cmd, match func(tea.Cmd, tea.Msg) bool) int {
 	if cmd == nil {
 		return 0
@@ -271,12 +256,10 @@ func cmdYieldsPrintln(cmd tea.Cmd) bool {
 	return countPrintlnLeaves(cmd) > 0
 }
 
-// printlnMsgType is the concrete message type tea.Println emits, captured
-// from the real constructor instead of matched by its (unexported) type
-// *name*. Matching on the name string would silently degrade to a no-op —
-// returning 0 and passing every resize-ordering assertion while checking
-// nothing — the day Charm renames that internal type on a bubbletea bump.
-// Capturing the type from tea.Println itself can't drift out of sync.
+// printlnMsgType is captured from tea.Println itself, not matched by its
+// unexported type *name*: a name-string match would silently degrade to a
+// no-op (passing every assertion while checking nothing) the day Charm
+// renames that internal type. Capturing from the constructor can't drift.
 var printlnMsgType = reflect.TypeOf(tea.Println("probe")())
 
 func countPrintlnLeaves(cmd tea.Cmd) int {

@@ -18,10 +18,9 @@ import (
 	"github.com/codehamr/codehamr/internal/update"
 )
 
-// updateBudget is the total wall-clock cap for the pre-launch auto-update
-// step (checksum fetch + binary download + rename). Generous enough for a
-// ~10MB Go binary on a slow connection, tight enough that an offline user
-// doesn't wait half a minute before the TUI appears.
+// updateBudget caps the pre-launch auto-update (checksum fetch + download +
+// rename): enough for a ~10MB binary on a slow link, short enough that an
+// offline user isn't stalled before the TUI appears.
 const updateBudget = 20 * time.Second
 
 // version is injected via -ldflags at build time; "dev" when running `go run`.
@@ -39,23 +38,16 @@ func main() {
 		}
 	}
 
-	// Wipe the previous session's superseded binary, if any. update.Apply
-	// renames the running exe to <path>.old before promoting the new
-	// download into place; on Windows the old file stays locked until the
-	// previous codehamr process exits, so unlink-at-Apply-time would race
-	// the lock. Doing it at the start of every launch always wins, on
-	// every platform, and keeps a stale file out of the install dir.
+	// Wipe last session's superseded binary. Apply renames the running exe
+	// to <path>.old before promoting the new one; on Windows that old file
+	// stays locked until the prior process exits, so deleting it at launch
+	// (not at Apply time) always wins.
 	if exe, err := os.Executable(); err == nil {
 		update.CleanupOld(exe)
 	}
 
-	// Pre-launch auto-update: if the checksum of the running binary differs
-	// from the latest release's published sha256, download the new binary,
-	// swap it in, and re-exec so the user immediately runs the fresh
-	// version. All failures are non-fatal — a flaky network, missing asset,
-	// or read-only install dir (typical for /usr/local/bin without sudo) all
-	// fall through to launching the old binary unchanged, with a single
-	// stderr line so the user knows why it didn't take.
+	// Pre-launch auto-update; all failures are non-fatal and fall through to
+	// the old binary.
 	maybeSelfUpdate()
 
 	cwd := mustCwd()
@@ -68,9 +60,8 @@ func main() {
 	}
 	applyEnvOverrides(cfg)
 
-	// Debug instrumentation: opt-in via `logging: true` in config.yaml.
-	// Truncates .codehamr/log.txt and records every chat exchange. Search
-	// for `tui.OpenDebugLog` and `dbgWrite` to remove cleanly.
+	// Opt-in debug log (`logging: true`): truncates .codehamr/log.txt and
+	// records every chat exchange. See tui.OpenDebugLog / dbgWrite.
 	if cfg.Logging {
 		tui.OpenDebugLog(cfg.Dir)
 		defer tui.CloseDebugLog()
@@ -82,28 +73,21 @@ func main() {
 	abs, _ := filepath.Abs(cwd)
 	m := tui.New(cfg, client, abs, version)
 
-	// Hard clear before the TUI takes over: \x1b[2J wipes the visible
-	// viewport, \x1b[3J erases the scrollback buffer, \x1b[H homes the
-	// cursor. Coding sessions live for hours in the same devcontainer
-	// terminal, so prior shell history is mental noise the user almost
-	// never scrolls back to during a session. Wiping it gives a clean
-	// canvas — "hamrtime" — and is compatible with inline-mode (the
-	// session's own scrollback still accumulates via tea.Println below).
+	// Hard clear before the TUI takes over: \x1b[2J viewport, \x1b[3J
+	// scrollback, \x1b[H cursor home — a clean canvas free of prior shell
+	// history. Inline-mode safe: the session's own scrollback still
+	// accumulates via tea.Println.
 	os.Stdout.WriteString("\x1b[2J\x1b[3J\x1b[H")
 
-	// Inline mode (no AltScreen, no mouse capture): the TUI renders only
-	// the prompt + status bar live region at the bottom of the terminal,
-	// and pushes everything else into native scrollback via tea.Println.
-	// The terminal itself owns mouse-wheel scrolling, PgUp/PgDn, text
-	// selection, and copy/paste — exactly like any normal shell session.
+	// Inline mode (no AltScreen, no mouse capture): only the prompt + status
+	// bar render live at the bottom; everything else goes to native
+	// scrollback via tea.Println, leaving scrolling/selection/copy to the
+	// terminal.
 	//
-	// WithReportFocus turns raw focus-in / focus-out escape sequences
-	// (\x1b[I / \x1b[O) into typed tea.FocusMsg / tea.BlurMsg. Without
-	// it, VS Code's integrated terminal and similar xterm.js hosts leak
-	// those bytes as runes into the textarea on every window switch,
-	// inflating the prompt height by "invisible" characters until the UI
-	// appears to shift upward. Swallowing the typed msgs in Update
-	// prevents the leak entirely.
+	// WithReportFocus types raw focus-in/out sequences (\x1b[I / \x1b[O) as
+	// tea.FocusMsg / tea.BlurMsg so Update can swallow them; otherwise
+	// xterm.js hosts (VS Code) leak those bytes as runes into the textarea
+	// on every window switch, inflating prompt height with invisible chars.
 	if _, err := tea.NewProgram(m, tea.WithReportFocus()).Run(); err != nil {
 		log.Fatalf("codehamr: %v", err)
 	}
@@ -132,40 +116,23 @@ Env:
   CODEHAMR_URL         override the active profile's url at runtime`))
 }
 
-// isLocalBuild reports whether the current binary was compiled from a
-// working tree rather than pulled from an official release. `go run` keeps
-// `main.version` at its "dev" default; `make install` on a dirty tree
-// embeds a `-dirty` suffix via `git describe --dirty`. Goreleaser pins a
-// clean tag like `v1.2.3`, so released binaries read as non-local and
-// continue to self-update.
+// isLocalBuild reports whether the binary came from a working tree rather
+// than an official release. `go run` leaves version "dev"; `make install` on
+// a dirty tree adds a "-dirty" suffix. Goreleaser tags read as non-local and
+// still self-update.
 func isLocalBuild(version string) bool {
 	return version == "dev" || strings.HasSuffix(version, "-dirty")
 }
 
-// maybeSelfUpdate runs the pre-launch auto-update step. It's a no-op when:
-//   - version is "dev" (the `go run` default — updating would overwrite the
-//     temp binary Go just compiled from local sources with an older release
-//     and silently hide unreleased work),
-//   - version ends with "-dirty" (locally built from an uncommitted tree via
-//     `make install`; same reasoning — respect what the developer just
-//     built),
-//   - the sha256 of the running binary already matches the published release,
-//   - the platform is unsupported (see update.assetName),
-//   - the network, CDN, or filesystem refuses.
-//
-// On success it swaps the binary on disk and re-execs via syscall.Exec so
-// the current process becomes the new binary in place — no fork, no child,
-// no second "restart". syscall.Exec only returns on error; a successful
-// call never comes back.
-//
-// Any failure past the point of "update is available" prints one short line
-// to stderr and returns, letting main() proceed with the old binary.
+// maybeSelfUpdate runs the pre-launch auto-update. No-op for local builds,
+// an already-current hash, an unsupported platform (see update.assetName),
+// or any network/filesystem refusal. On success it swaps the binary and
+// re-execs via reExec (which only returns on failure). Any failure past
+// "update available" prints one stderr line and proceeds with the old binary.
 func maybeSelfUpdate() {
-	// Guard against overwriting a locally-built binary with an older
-	// release. Without this, `go run` (version=="dev") would hash its temp
-	// `go-build` binary, find it differs from the published checksum, and
-	// silently swap in the last release — hiding any unreleased local
-	// changes behind an "update applied" banner.
+	// Skip local builds: hashing a `go run` temp binary against the
+	// published checksum would otherwise swap in the last release and hide
+	// unreleased work behind an "update applied" banner.
 	if isLocalBuild(version) {
 		return
 	}
@@ -186,23 +153,18 @@ func maybeSelfUpdate() {
 		}
 		return
 	}
-	// Re-launch the freshly-installed binary. reExec is platform-split:
-	// unix execve replaces the process image in place (same PID, seamless
-	// to the parent shell); Windows can't execve so reexec_windows.go
-	// spawns the new exe as a child, waits for it, and forwards its exit
-	// code, achieving the same user-visible "one session, new binary"
-	// outcome. The replacement run carries CODEHAMR_NO_UPDATE_CHECK=1 so
-	// it doesn't loop into a second check against its own freshly-written
-	// hash. reExec only returns on failure (spawn error / missing binary);
-	// in that case we fall through to the old in-memory binary.
+	// Re-launch the new binary. reExec is platform-split: unix execve (same
+	// PID) vs. Windows spawn-and-wait. CODEHAMR_NO_UPDATE_CHECK=1 stops the
+	// replacement run from re-checking its own freshly-written hash. On
+	// reExec failure we fall through to the old in-memory binary.
 	env := append(os.Environ(), "CODEHAMR_NO_UPDATE_CHECK=1")
 	if err := reExec(exe, os.Args, env); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ re-exec failed: %v (continuing with previous version)\n", err)
 	}
 }
 
-// mustCwd returns the current working directory or exits 1. Only called from
-// top-level command handlers where there is nothing sensible to recover to.
+// mustCwd returns the working directory or exits 1 — called only where
+// there's nothing sensible to recover to.
 func mustCwd() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -212,9 +174,8 @@ func mustCwd() string {
 }
 
 // applyEnvOverrides folds runtime env vars into cfg. CODEHAMR_URL overrides
-// the active profile's URL — useful in devcontainers / CI where the endpoint
-// sidecar address isn't known until runtime. The override lives on cfg in a
-// non-serialised field so it never round-trips into config.yaml on Save.
+// the active profile's URL (devcontainers / CI), held on a non-serialised
+// field so it never round-trips into config.yaml on Save.
 func applyEnvOverrides(cfg *config.Config) {
 	if envURL := os.Getenv("CODEHAMR_URL"); envURL != "" {
 		cfg.URLOverride = envURL

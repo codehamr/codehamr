@@ -1,20 +1,18 @@
 // Package llm is codehamr's only LLM client. It speaks the OpenAI
 // chat-completions wire format and nothing else: one POST to
-// `$BaseURL/v1/chat/completions`, SSE streaming back, no per-backend branches.
+// `$BaseURL/v1/chat/completions`, SSE streamed back, no per-backend branches.
 //
-// The same code path serves every backend codehamr supports:
+// One code path serves every backend:
 //   - local Ollama, via the OpenAI-compatible `/v1` shim Ollama itself ships
-//   - the codehamr.com hosted endpoint authenticated by hamrpass keys
-//     (FastAPI proxy in front of OpenRouter)
-//   - any other endpoint that already speaks OpenAI's wire format
+//   - the codehamr.com hosted endpoint, hamrpass-keyed (proxy over OpenRouter)
+//   - any other endpoint already speaking OpenAI's wire format
 //
-// What is *not* supported, on purpose, to keep the client uniform:
+// Deliberately unsupported, to keep the client uniform:
 //   - Ollama's native `/api/chat` (NDJSON, different schema, no tool-call IDs)
-//   - LiteLLM's `ollama_chat` translator (non-standard delta fields, shared
-//     tool-call indices)
+//   - LiteLLM's `ollama_chat` translator (non-standard deltas, shared indices)
 //
-// If you find yourself special-casing a provider in this file, the right fix
-// is almost always to make the server emit standard OpenAI shapes instead.
+// If you're special-casing a provider here, the fix almost always belongs on
+// the server: make it emit standard OpenAI shapes.
 package llm
 
 import (
@@ -44,13 +42,11 @@ type FunctionDef struct {
 	Parameters  map[string]any `json:"parameters"`
 }
 
-// wireMessage is the request-side OpenAI shape. Outbound only; the response
-// is parsed via streamChunk below.
+// wireMessage is the outbound OpenAI request shape; responses parse via streamChunk.
 //
-// Content has no omitempty: silent bash commands (e.g. heredoc writes) produce
-// an empty tool-result string, and omitting the field causes Ollama's /v1 shim
-// to 400 with "invalid message content type: <nil>". Always send an explicit
-// string.
+// Content has no omitempty: silent bash commands (e.g. heredoc writes) yield an
+// empty tool-result string, and omitting the field makes Ollama's /v1 shim 400
+// with "invalid message content type: <nil>". Always send an explicit string.
 type wireMessage struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content"`
@@ -60,9 +56,8 @@ type wireMessage struct {
 }
 
 type toolCall struct {
-	// Index identifies which tool call a streaming delta belongs to. OpenAI
-	// streams tool-call fragments across multiple chunks and each fragment
-	// carries its index; slot lookup MUST key on this, not on slice position.
+	// Index keys which call a streaming delta belongs to. Fragments arrive
+	// across chunks; slot lookup MUST key on this, not on slice position.
 	Index    int          `json:"index,omitempty"`
 	ID       string       `json:"id,omitempty"`
 	Type     string       `json:"type,omitempty"` // always "function"
@@ -83,19 +78,16 @@ type chatRequest struct {
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 }
 
-// streamOptions carries per-stream flags. The only one we use is
-// include_usage: without it, OpenAI-compatible servers never emit the usage
-// block in the SSE tail chunk and the per-turn counter sits at 0. Unknown
-// flags are ignored by servers that don't support them.
+// streamOptions: without include_usage, OpenAI-compatible servers omit the
+// usage block in the SSE tail chunk and the per-turn token counter sits at 0.
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
-// streamChunk is one OpenAI SSE frame. finish_reason is intentionally not
-// decoded: readSSE dispatches accumulated tool calls at stream end rather
-// than reacting to finish_reason=="tool_calls", which keeps the path
-// provider agnostic (Ollama's /v1 shim sometimes closes with "stop" even
-// after streaming tool_calls).
+// streamChunk is one OpenAI SSE frame. finish_reason is deliberately not
+// decoded: readSSE dispatches accumulated tool calls at stream end, not on
+// finish_reason=="tool_calls" — provider agnostic, since Ollama's /v1 shim
+// sometimes closes with "stop" even after streaming tool_calls.
 type streamChunk struct {
 	Choices []struct {
 		Delta streamDelta `json:"delta"`
@@ -108,12 +100,10 @@ type streamChunk struct {
 type streamDelta struct {
 	Role    string `json:"role,omitempty"`
 	Content string `json:"content,omitempty"`
-	// Reasoning carries the incremental chain-of-thought fragment that
-	// reasoning models (Qwen3, o1, ...) stream in `delta.reasoning` while
-	// the server is still "thinking" and has not yet started producing
-	// answer tokens. Forwarded as EventReasoning so the UI keeps animating
-	// during the thinking phase. It never round-trips into the assistant
-	// message — reasoning has no business being in conversation history.
+	// Reasoning is the incremental chain-of-thought fragment that reasoning
+	// models (Qwen3, o1, ...) stream in `delta.reasoning` before answer
+	// tokens. Forwarded as EventReasoning to keep the UI animating, but never
+	// round-trips into the assistant message — it has no place in history.
 	Reasoning string     `json:"reasoning,omitempty"`
 	ToolCalls []toolCall `json:"tool_calls,omitempty"`
 }
@@ -122,12 +112,11 @@ type streamDelta struct {
 type Event struct {
 	Kind    EventKind
 	Content string
-	// ContextWindow carries the server-authoritative context size from the
-	// X-Context-Window response header, populated only on EventDone (and
-	// only when the server actually set the header). The TUI overwrites
-	// the active profile's in-memory ContextSize with this value so the
-	// next ctx.Pack uses what the server allows, not what config.yaml
-	// guessed. Zero means "no live value in this response".
+	// ContextWindow is the server-authoritative context size from the
+	// X-Context-Window header, set only on EventDone when the server sent it.
+	// The TUI overwrites the profile's in-memory ContextSize so the next
+	// ctx.Pack uses what the server allows, not config.yaml's guess. Zero
+	// means no live value in this response.
 	ContextWindow int
 	ToolCall      *chmctx.ToolCall
 	Final         *chmctx.Message
@@ -144,10 +133,8 @@ const (
 	EventToolCall
 	EventDone
 	EventError
-	// EventReasoning carries incremental reasoning text. Not part of the
-	// assistant message that gets appended to history (reasoning stays
-	// out of the transcript) — exists so the UI can tick its live token
-	// estimate while the model is in the thinking phase.
+	// EventReasoning carries incremental reasoning text, kept out of history
+	// — exists only so the UI can tick its live token estimate while thinking.
 	EventReasoning
 )
 
@@ -156,30 +143,24 @@ type Client struct {
 	Model   string
 	Token   string // optional; empty = no Authorization header
 	HTTP    *http.Client
-	// noReasoningEffort is set to true once the server returns the
-	// standard 400 saying it doesn't accept reasoning on this model:
-	// OpenAI gpt-5.5+ rejects tools + reasoning_effort on
-	// /v1/chat/completions (they push that combo onto /v1/responses),
-	// Ollama rejects reasoning_effort on non-thinking models like
-	// qwen3-coder. Sticky for the lifetime of the Client so subsequent
-	// turns skip straight to the supported shape. A `/models` switch
-	// builds a fresh Client and the flag resets, which is correct: the
-	// new endpoint may be a different provider with different rules.
+	// noReasoningEffort goes true once the server 400s on reasoning for this
+	// model (OpenAI gpt-5.5+ rejects tools + reasoning_effort here, pushing
+	// that combo onto /v1/responses; Ollama rejects it on non-thinking models
+	// like qwen3-coder). Sticky for the Client's lifetime so later turns skip
+	// to the supported shape; a `/models` switch builds a fresh Client and
+	// resets it, correctly, since the new endpoint may have different rules.
 	//
-	// atomic.Bool because Probe and Chat can run concurrently against
-	// the same Client (startup probe still in flight when the user
-	// fires their first turn), and both call postChat which reads this
-	// flag; Chat may also write it. A plain bool would be a Go data race.
+	// atomic.Bool: Probe and Chat race on the same Client (startup probe still
+	// in flight when the first turn fires) and both read it via postChat; Chat
+	// may also write it. A plain bool would be a data race.
 	noReasoningEffort atomic.Bool
 }
 
-// New builds a Client whose lifetime is governed by the caller's context,
-// not by http.Client.Timeout. That field is end-to-end — it covers reading
-// the response body — and would kill a legitimately slow SSE stream mid-flight
-// (the "context deadline exceeded … while reading body" abort on slow local
-// backends generating long outputs). The per-turn context in tui.Model
-// (turnCtx) is the single source of truth for cancellation; connect-level
-// safety (DNS / TCP) is already bounded by Go's default Dialer (30 s).
+// New builds a Client governed by the caller's context, not http.Client.Timeout.
+// That timeout is end-to-end (it covers body reads) and would kill a slow but
+// legitimate SSE stream mid-flight on slow local backends. tui.Model's turnCtx
+// is the single cancellation source; connect-level safety (DNS/TCP) is already
+// bounded by Go's default Dialer (30s).
 func New(base, model, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(base, "/"),
@@ -189,26 +170,22 @@ func New(base, model, token string) *Client {
 	}
 }
 
-// ProbeResult is what Probe extracts from a one-shot hello-world request:
-// the live context window the server allocates for this caller and the
-// budget snapshot. The TUI uses these at activation time so the user sees
-// their real context window in the confirmation line and the next ctx.Pack
-// uses the server-authoritative number, not the config.yaml fallback.
+// ProbeResult holds what Probe extracts from a one-shot hello request: the
+// live context window and budget snapshot. The TUI shows the real window at
+// activation time and feeds the authoritative size to ctx.Pack instead of the
+// config.yaml fallback.
 type ProbeResult struct {
 	ContextWindow int
 	Budget        cloud.BudgetStatus
 }
 
-// Probe sends a minimal hello chat to /v1/chat/completions just to harvest
-// response headers in one round trip: HTTP status validates the
-// URL/model/key combo, X-Context-Window carries the live context size,
-// X-Budget-Remaining carries the live budget fraction. The body is closed
-// without reading any SSE — we only care about the headers, and on the
-// cloud proxy that means generation may already be charged for one token,
-// which is the cost of having a single round-trip "key works AND here is
-// your real window". Returns the standard cloud errors (Unreachable,
-// Unauthorized, BudgetExhausted) so callers can branch on them with
-// errors.Is.
+// Probe sends a minimal hello chat just to harvest response headers in one
+// round trip: status validates the URL/model/key combo, X-Context-Window gives
+// the live size, X-Budget-Remaining the live fraction. The body is closed
+// unread — on the cloud proxy that may already charge one token, the cost of a
+// single round-trip "key works AND here is your real window". Returns the
+// standard cloud errors (Unreachable, Unauthorized, BudgetExhausted) for
+// errors.Is branching.
 func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 	resp, budget, err := c.postChat(parent, chatRequest{
 		Model:    c.Model,
@@ -225,14 +202,12 @@ func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 	}, nil
 }
 
-// Chat streams an assistant response. Events are delivered on the returned
-// channel; the channel is closed when the stream ends. Reasoning runs at
-// `high` effort by default; if the server explicitly rejects the
-// tools + reasoning_effort combo on /v1/chat/completions (OpenAI's gpt-5.5+
-// does), postChat drops reasoning_effort for the rest of this Client's
-// lifetime so the model still works — without reasoning, but with tools.
-// Staying on the chat-completions wire format is the product line; we do
-// not branch to /v1/responses to preserve reasoning.
+// Chat streams an assistant response on the returned channel, closing it when
+// the stream ends. Reasoning runs at `high` effort by default; if the server
+// rejects the tools + reasoning_effort combo (OpenAI's gpt-5.5+ does), postChat
+// drops reasoning_effort for this Client's lifetime so the model still works,
+// with tools but no reasoning. Staying on chat-completions is the product line;
+// we do not branch to /v1/responses to keep reasoning.
 func (c *Client) Chat(parent context.Context, messages []chmctx.Message, tools []Tool) <-chan Event {
 	out := make(chan Event, 32)
 	go c.run(parent, messages, tools, out)
@@ -267,9 +242,9 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	})
 }
 
-// sendEvent puts e on out, bailing out if parent is cancelled first. Used
-// everywhere run() and readSSE() publish so a slow / vanished consumer
-// after Ctrl+C can never wedge the stream goroutine on a full-buffer send.
+// sendEvent puts e on out, bailing if parent cancels first — so a slow or
+// vanished consumer after Ctrl+C can't wedge the stream goroutine on a full
+// buffer.
 func sendEvent(parent context.Context, out chan<- Event, e Event) bool {
 	select {
 	case out <- e:
@@ -279,11 +254,9 @@ func sendEvent(parent context.Context, out chan<- Event, e Event) bool {
 	}
 }
 
-// sendChat POSTs the chat-completions request and returns the response on
-// 200. On any failure path it returns the Event the caller should forward
-// to the stream, already populated with the right Kind/Err/Budget. The
-// response body is closed by the helper on every non-200 branch; the 200
-// branch leaves it open for the caller's defer.
+// sendChat POSTs the request and returns the response on 200. On failure it
+// returns the Event the caller forwards, populated with Kind/Err/Budget. The
+// body is closed on every non-200 branch; 200 leaves it open for the caller.
 func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools []Tool) (*http.Response, *Event) {
 	resp, budget, err := c.postChat(parent, chatRequest{
 		Model:           c.Model,
@@ -299,15 +272,13 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 	return resp, nil
 }
 
-// postChat dispatches the chat request via doPost and on a standard 400
-// saying the server doesn't accept reasoning drops reasoning_effort for
-// the lifetime of this Client and retries exactly once. Two flavours seen
-// in the wild, both caught by loose substring matching on the response
-// body: OpenAI gpt-5.5+ ("reasoning_effort … not supported") and Ollama
-// non-thinking models ("<model> does not support thinking"). Matching the
-// shared "not support" plus either signal keeps the trigger precise
-// without parsing JSON shapes that differ between providers. Probe never
-// sets ReasoningEffort, so its 400 path can never trip the flag.
+// postChat dispatches via doPost; on a 400 rejecting reasoning it drops
+// reasoning_effort for this Client's lifetime and retries once. Two wild
+// flavours, both caught by substring match: OpenAI gpt-5.5+
+// ("reasoning_effort … not supported") and Ollama non-thinking models
+// ("<model> does not support thinking"). Matching shared "not support" plus
+// either signal stays precise without parsing provider-specific JSON. Probe
+// never sets ReasoningEffort, so its 400 can't trip the flag.
 func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, error) {
 	if c.noReasoningEffort.Load() {
 		body.ReasoningEffort = ""
@@ -324,14 +295,12 @@ func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Respo
 	return resp, budget, err
 }
 
-// doPost performs one round-trip and maps response status into the typed
-// cloud errors Probe and sendChat share. On 200 it returns the live
-// response with its body still open for the caller's streaming reader; on
-// any non-200 the body is drained and closed before returning. Budget is
-// populated only on the 402 path, where the body carries a structured
-// "budget exhausted" payload the UI surfaces. The errBody return is the
-// raw error body bytes on a non-2xx other than 401/402, so postChat can
-// inspect it for the reasoning_effort fallback signal without re-reading.
+// doPost performs one round-trip, mapping status into the typed cloud errors
+// Probe and sendChat share. On 200 it returns the live response with body open
+// for streaming; on non-200 the body is drained and closed first. Budget is set
+// only on 402. errBody returns the raw body on a non-2xx other than 401/402, so
+// postChat can check it for the reasoning_effort fallback signal without
+// re-reading.
 func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, []byte, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -358,9 +327,8 @@ func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Respons
 	case 401:
 		return nil, cloud.BudgetStatus{}, nil, cloud.ErrUnauthorized
 	case 402:
-		// Pass is depleted. Body is ignored on purpose: the status code is
-		// the whole signal, the UI banner is fixed text, and the budget
-		// snapshot we return reflects the depletion directly.
+		// Pass depleted. Body ignored: the status code is the whole signal,
+		// the UI banner is fixed text, the returned snapshot reflects it.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, cloud.BudgetStatus{Set: true, Remaining: 0}, nil, cloud.ErrBudgetExhausted
 	default:
@@ -370,12 +338,10 @@ func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Respons
 }
 
 // errorMessageFromBody extracts the user-facing string from a non-2xx body.
-// codehamr.com's hamrpass proxy wraps every error in a structured envelope
-// (`{"error":{"message":"...","provider_hint":"..."}}`) and we prefer
-// `provider_hint` when present because providers stash their human-readable
-// diagnostic there ("rate-limited, retry shortly"). Falls back to `message`,
-// then to the raw first line so non-hamrpass backends (Ollama, bare OpenAI,
-// etc.) keep surfacing whatever they emit.
+// hamrpass wraps errors as `{"error":{"message":...,"provider_hint":...}}`; we
+// prefer provider_hint (providers stash the human diagnostic there), fall back
+// to message, then to the raw first line so non-hamrpass backends still surface
+// whatever they emit.
 func errorMessageFromBody(b []byte) string {
 	var env struct {
 		Error struct {
@@ -395,11 +361,10 @@ func errorMessageFromBody(b []byte) string {
 }
 
 // readSSE reads OpenAI SSE frames until [DONE] or EOF, forwarding
-// content/reasoning/tool-call events to out as they arrive. Returns the
-// final assistant message (content + accumulated tool calls), the
-// server-reported token count, and the scanner error if any. parent is
-// threaded through so sends to out abort cleanly on cancellation rather
-// than blocking on a buffer that nobody is draining any more.
+// content/reasoning/tool-call events to out. Returns the final assistant
+// message (content + accumulated tool calls), the server token count, and any
+// scanner error. parent is threaded through so sends abort on cancellation
+// instead of blocking on an undrained buffer.
 func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, out chan<- Event) (*chmctx.Message, int, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1<<16), 4<<20)
@@ -437,13 +402,11 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 		return nil, 0, err
 	}
 
-	// Emit accumulated tool calls exactly once, at stream end, independent
-	// of finish_reason. Ollama's /v1 shim sometimes closes with "stop" even
-	// when it just streamed tool_calls; dispatching here (instead of
-	// in-loop on finish_reason=="tool_calls") makes the path provider
-	// agnostic. Resolve every slot up front so the tool call payload is
-	// parsed once and shared between the EventToolCall stream and the
-	// final assistant message's ToolCalls.
+	// Emit accumulated tool calls once at stream end, independent of
+	// finish_reason — Ollama's /v1 shim sometimes closes with "stop" even
+	// after streaming tool_calls, so dispatching here (not on
+	// finish_reason=="tool_calls") stays provider agnostic. Resolve every slot
+	// once, sharing the parsed payload between the events and the final message.
 	calls := make([]chmctx.ToolCall, 0, len(order))
 	for _, idx := range order {
 		calls = append(calls, slots[idx].resolve())
@@ -461,13 +424,11 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 }
 
 // dispatchDelta forwards reasoning and content as events, then accumulates
-// streamed tool-call fragments into their index-keyed slots. Reasoning
-// stays out of fullContent — it must not round-trip back into the
-// assistant message — but we forward it so the UI can reflect activity
-// while the model is thinking. Tool-call fragments key on the provider's
-// `index`, not on slice position, because a given call's fragments arrive
-// across several chunks whose slice position need not match the index.
-// Returns false when parent cancelled mid-send so the caller can bail.
+// streamed tool-call fragments into index-keyed slots. Reasoning stays out of
+// fullContent (must not round-trip into the assistant message) but is forwarded
+// so the UI reflects thinking. Fragments key on the provider's `index`, not
+// slice position, since a call's fragments span chunks whose position need not
+// match the index. Returns false when parent cancelled mid-send.
 func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetStatus, fullContent *strings.Builder, slots map[int]*toolSlot, order *[]int, out chan<- Event) bool {
 	if d.Reasoning != "" {
 		if !sendEvent(parent, out, Event{Kind: EventReasoning, Content: d.Reasoning, Budget: budget}) {
@@ -487,11 +448,10 @@ func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetSta
 			slots[tc.Index] = slot
 			*order = append(*order, tc.Index)
 		}
-		// id and name are typically populated on the first fragment, but
-		// updating on any non-empty value keeps a sloppy provider that
-		// ships them in a later chunk from losing them — without this an
-		// empty tool_call_id would round-trip into history and the next
-		// /v1 request would 400 on the unpaired tool message.
+		// id/name usually arrive in the first fragment, but updating on any
+		// non-empty value tolerates a provider that ships them later —
+		// otherwise an empty tool_call_id round-trips into history and the
+		// next /v1 request 400s on the unpaired tool message.
 		if tc.ID != "" {
 			slot.id = tc.ID
 		}
@@ -503,10 +463,9 @@ func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetSta
 	return true
 }
 
-// toolSlot accumulates one streamed tool call. OpenAI delivers the
-// `arguments` field as a string of JSON that arrives in fragments across
-// many SSE chunks — each fragment invalid on its own. We append them raw
-// and parse exactly once, when resolve() is called.
+// toolSlot accumulates one streamed tool call. OpenAI delivers `arguments` as
+// JSON fragmented across chunks, each fragment invalid alone; we append raw and
+// parse once, in resolve().
 type toolSlot struct {
 	id, name string
 	args     strings.Builder
@@ -516,10 +475,9 @@ func (t *toolSlot) resolve() chmctx.ToolCall {
 	parsed := map[string]any{}
 	if t.args.Len() > 0 {
 		if err := json.Unmarshal([]byte(t.args.String()), &parsed); err != nil {
-			// Malformed streamed args surface as a sentinel key rather
-			// than a silently empty map so the tool-result log at least
-			// names what broke. Real args never start with _parse_error,
-			// so collisions aren't a concern.
+			// Malformed args surface as a sentinel key, not a silently empty
+			// map, so the log names what broke. Real args never use
+			// _parse_error, so collisions aren't a concern.
 			parsed["_parse_error"] = err.Error()
 		}
 	}

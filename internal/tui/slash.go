@@ -14,17 +14,16 @@ import (
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
-// argOption is one entry in the popover — used both at command-level (one row
-// per available command) and at argument-level (one row per accepted value
-// for the active command).
+// argOption is one popover entry — used at command-level (one row per command)
+// and argument-level (one row per accepted value for the active command).
 type argOption struct {
 	value       string // what gets inserted / committed
 	description string // right-aligned help text
 	current     bool   // rendered bold; default-selected when the popover opens
 }
 
-// command is one row in the command-level popover, --help, and the dispatch
-// table. `args`, if non-nil, supplies the argument-level popover entries.
+// command is one row in the popover, --help, and the dispatch table.
+// args, if non-nil, supplies the argument-level popover entries.
 type command struct {
 	name        string
 	description string
@@ -32,21 +31,17 @@ type command struct {
 	args        func(Model) []argOption
 }
 
-// commands lists every slash command. Order is the order shown in the popover
-// and --help. Keep it short — YAGNI applies to command surface.
+// commands lists every slash command, in popover/--help order. Keep it short.
 var commands = []command{
 	{
 		name:        "/hamrpass",
 		description: "set or show hamrpass key",
 		handler:     (Model).cmdHamrpass,
-		// args turns the popover into a live key-entry hint: picking
-		// /hamrpass auto-inserts the trailing space (handleEnter +
-		// handleTab already do this whenever args != nil), then the
-		// arg popover renders one synthetic row whose description
-		// validates the typed/pasted key live. The row's value mirrors
-		// the input so the popover's HasPrefix filter always keeps it,
-		// and Enter on the row submits "/hamrpass <key>" via the same
-		// path /hamrpass typed manually would take.
+		// Live key-entry hint: selecting /hamrpass auto-inserts the trailing
+		// space (handleEnter/handleTab do this whenever args != nil), then the
+		// arg popover renders one synthetic row that validates the key live.
+		// The row's value mirrors the input so HasPrefix always keeps it, and
+		// Enter submits "/hamrpass <key>".
 		args: hamrpassArgHint,
 	},
 	{
@@ -73,10 +68,8 @@ var commands = []command{
 	},
 }
 
-// commandByName returns the registered command with the given slash name,
-// or nil when the name is not registered. Popover completion, Enter
-// dispatch, refreshSuggest, and runSlash all need the same linear scan —
-// this centralises it.
+// commandByName returns the registered command for a slash name, or nil.
+// Centralises the linear scan shared by completion, dispatch, and runSlash.
 func commandByName(name string) *command {
 	for i := range commands {
 		if commands[i].name == name {
@@ -86,13 +79,9 @@ func commandByName(name string) *command {
 	return nil
 }
 
-// runSlash dispatches a slash-prefixed submission. Unknown commands produce a
+// runSlash dispatches a slash-prefixed submission; unknown commands produce a
 // quiet hint, not an error. config.yaml is re-read before every slash so
-// hand-edits (new profile, changed URL, deleted entry) take effect without
-// a restart — see reloadConfigFromDisk for the failure-handling contract.
-// refreshSuggest does an additional silent reload on the cmd→arg popover
-// transition so the live suggestion list (e.g. /models <name>) reflects
-// external edits even before the user submits.
+// hand-edits take effect without a restart (see reloadConfigFromDisk).
 func (m Model) runSlash(text string) (tea.Model, tea.Cmd) {
 	if err := m.reloadConfigFromDisk(); err != nil {
 		m.appendLine(styleWarn.Render("⚠ " + err.Error()))
@@ -105,21 +94,16 @@ func (m Model) runSlash(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// reloadConfigFromDisk re-runs config.Bootstrap and replaces m.cfg so any
-// hand-edits to .codehamr/config.yaml between slash commands are visible
-// immediately. Runtime-only fields (URLOverride from CODEHAMR_URL) are
-// carried over so the env var continues to apply after the swap.
+// reloadConfigFromDisk re-runs config.Bootstrap and replaces m.cfg so hand-edits
+// to config.yaml between slash commands take effect immediately. URLOverride
+// (from CODEHAMR_URL) is carried across the swap so the env var keeps applying.
 //
-// Returns the Bootstrap error verbatim — callers decide whether to surface
-// it (runSlash prints a warning line; the popover-refresh path ignores it
-// so a broken file doesn't spam a warning on every keystroke during slash
-// typing — runSlash will surface it when the user actually submits).
+// Returns the Bootstrap error verbatim; callers decide whether to surface it
+// (runSlash warns on submit; the popover-refresh path ignores it so a broken
+// file doesn't spam a warning on every keystroke).
 //
-// When the resolved (URL, model, key) triple of the active profile has
-// changed since the last load, the live llm.Client is rebuilt so the next
-// chat dials the new endpoint. Within-profile field changes (URL/model/key
-// edited under the same active name) and across-profile changes (active
-// itself moved) both flow through the same comparison.
+// Rebuilds the llm.Client when the active profile's resolved (URL, model, key)
+// triple changed — covers both within-profile edits and a moved active.
 func (m *Model) reloadConfigFromDisk() error {
 	projectRoot := filepath.Dir(m.cfg.Dir)
 	fresh, _, err := config.Bootstrap(projectRoot)
@@ -152,8 +136,8 @@ func PrintHelp(out io.Writer) {
 
 // --- handlers ---------------------------------------------------------------
 
-// cmdModel: `/models` lists, `/models <name>` sets. Cycling happens in the
-// popover via Tab / Shift+Tab — no separate "next" command.
+// cmdModel: `/models` lists, `/models <name>` sets. Cycling is Tab/Shift+Tab
+// in the popover — no separate "next" command.
 func (m Model) cmdModel(args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
 		m.printModelList()
@@ -168,7 +152,6 @@ func (m Model) cmdModel(args []string) (tea.Model, tea.Cmd) {
 }
 
 // printModelList writes the "▸ active, name, llm @ url" rollup to scroll.
-// Called from the no-args branch of cmdModel.
 func (m *Model) printModelList() {
 	m.appendLine(styleDim.Render("models (▸ active, /models <name> to switch):"))
 	for _, n := range m.cfg.ModelNames() {
@@ -182,13 +165,11 @@ func (m *Model) printModelList() {
 	}
 }
 
-// confirmActive emits the activation line for the currently active profile
-// and returns the right reachability cmd. Profiles with a key (cloud
-// endpoints) get the Probe path: the success line is delayed until the
-// hello-world response arrives so it can carry the live ctx window from
-// X-Context-Window. Keyless profiles (local Ollama) get the cheaper ping
-// and the line prints synchronously. Shared between /models and /hamrpass
-// so both paths render the same confirmation.
+// confirmActive emits the activation line for the active profile and returns
+// its reachability cmd. Keyed profiles (cloud) probe: the success line is
+// delayed until the response arrives so it can carry the live ctx window from
+// X-Context-Window. Keyless profiles (local Ollama) ping and print
+// synchronously. Shared by /models and /hamrpass.
 func (m *Model) confirmActive(profile string) tea.Cmd {
 	p := m.cfg.ActiveProfile()
 	if p.Key != "" {
@@ -200,20 +181,17 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 }
 
 // rebuildClient swaps in a fresh llm.Client for the now-active profile.
-// Replacing the pointer rather than mutating fields drops the prior
-// Client's sticky fallback state (noReasoningEffort, HTTP keep-alive
-// pool tied to the prior URL) — different endpoint, different rules,
-// fresh slate is what the user expects after a switch.
+// Replacing the pointer (not mutating fields) drops the prior Client's sticky
+// state (noReasoningEffort, keep-alive pool tied to the old URL) — new
+// endpoint, fresh slate.
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()
 	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.Key)
-	// Drop the prior profile's cached BudgetStatus. m.budget is a single
-	// field with no profile association, so without this reset the footer
-	// keeps rendering hamrpass's "88% pass" segment after switching to a
-	// local profile that emits no X-Budget-* headers (nothing would
-	// overwrite it). A fresh BudgetStatus{} hides the segment until the
-	// new backend reports its own — local profiles stay clean, cloud
-	// profiles repopulate on the next applyDone or probe.
+	// Drop the prior profile's cached BudgetStatus. m.budget has no profile
+	// association, so without this reset the footer keeps rendering the old
+	// "88% pass" segment after switching to a local profile that emits no
+	// X-Budget-* headers (nothing would overwrite it). A fresh BudgetStatus{}
+	// hides the segment until the new backend reports its own.
 	m.budget = cloud.BudgetStatus{}
 }
 
@@ -222,49 +200,39 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.scroll.Reset()
 	m.sessionTokens = 0
 	m.streamingEstimate = 0
-	// /clear is the full-reset button: the repeated-failure streak resets
-	// with everything else so the next turn starts with no stale counter.
+	// Reset the repeated-failure streak so the next turn starts clean.
 	m.failKey, m.failStreak = "", 0
-	// Wipe prompt recall too — both the in-memory ring and the on-disk
-	// .codehamr/history. /clear is the project-scoped nuclear option, and
-	// leaving prompt history behind would contradict the "fresh start"
-	// promise the user gets from the rest of this handler.
+	// Wipe prompt recall too — in-memory ring and on-disk .codehamr/history —
+	// or leftover history would contradict the "fresh start" promise.
 	m.promptHistory = nil
 	m.histIdx = -1
 	_ = clearPromptHistory(m.cfg.Dir)
-	// /clear is the "fresh start" — pair to Ctrl+L (which also redraws
-	// but keeps scrollback). tea.ClearScreen alone emits \x1b[2J, which
-	// only wipes the visible viewport; the saved-lines buffer (DECSED 3)
-	// also needs eraseScrollback or old replies stay scrollable above the
-	// reset line, defeating the user-facing promise. Wrap the wipe + the
-	// "✓ conversation reset" Println in tea.Sequence so the print can't
-	// race past the clear (a bare tea.Batch dispatches both goroutines
-	// concurrently and the print would sometimes land before the clear,
-	// then get wiped out). scroll keeps the line for the resize replay
-	// path; outbox is cleared because the Sequence owns the print now.
+	// Full wipe (unlike Ctrl+L, which redraws but keeps scrollback).
+	// tea.ClearScreen emits \x1b[2J, which only wipes the viewport; the
+	// saved-lines buffer needs eraseScrollback (DECSED 3) too, or old replies
+	// stay scrollable above the reset line. tea.Sequence keeps the print from
+	// racing past the clear (tea.Batch runs both concurrently and the print
+	// could land first, then get wiped). scroll keeps the line for resize
+	// replay; outbox is cleared because the Sequence owns the print now.
 	line := styleOK.Render("✓ conversation reset")
 	m.scroll.WriteString(line + "\n")
 	m.outbox = nil
 	return m, tea.Sequence(tea.ClearScreen, eraseScrollback, tea.Println(line))
 }
 
-// hamrpassMinKeyLen guards against half-pasted keys. 16 is short enough that
-// any real hamrpass key clears the bar and long enough that a typo or stray
-// fragment never sneaks through validation.
+// hamrpassMinKeyLen guards against half-pasted keys: real keys clear 16,
+// stray fragments don't.
 const hamrpassMinKeyLen = 16
 
-// hamrpassValidate is the single source of truth for "is this key acceptable
-// and what should the UI say about it". Two callers share it: the inline
-// /hamrpass <key> handler and the arg popover hint. ok=false with an empty
-// trimmed key is the "show status block" signal — the caller decides
-// whether to print the help screen or simply keep the user typing.
+// hamrpassValidate is the single source of truth for whether a key is
+// acceptable and what the UI says about it. Shared by the inline /hamrpass
+// handler and the arg popover hint. ok=false with an empty trimmed key is the
+// "show status block" signal.
 //
-// Non-printable ASCII (NUL/ESC/DEL/CR/etc.) and non-ASCII runes are rejected
-// up front: http.Header.Set accepts the bytes but http.Client.Do then errors
-// with `net/http: invalid header field value for "Authorization"` on the
-// wire, leaving the user staring at a cryptic transport message after the
-// key has already been *persisted* to config.yaml. Real hamrpass keys are
-// ASCII-printable; reject anything else loud and early.
+// Non-printable/non-ASCII runes are rejected up front: http.Header.Set accepts
+// the bytes but http.Client.Do then errors with `invalid header field value
+// for "Authorization"` on the wire — after the key has already been persisted
+// to config.yaml. Real keys are ASCII-printable; reject anything else early.
 func hamrpassValidate(raw string) (key, hint string, ok bool) {
 	key = strings.TrimSpace(raw)
 	switch {
@@ -284,12 +252,10 @@ func hamrpassValidate(raw string) (key, hint string, ok bool) {
 	return key, "Enter to activate", true
 }
 
-// hamrpassArgHint is the args callback for /hamrpass. It returns one
-// synthetic row whose value mirrors the user's currently typed argument and
-// whose description carries the live validation hint. Mirroring the value
-// is what keeps the row alive across keystrokes — popover.refreshSuggest
-// filters via HasPrefix(option.value, argPrefix) and HasPrefix(x, x) is
-// always true, so this row never disappears.
+// hamrpassArgHint is the args callback for /hamrpass: one synthetic row whose
+// value mirrors the typed argument and whose description carries the live
+// validation hint. Mirroring keeps the row alive — refreshSuggest filters via
+// HasPrefix(value, prefix), and HasPrefix(x, x) is always true.
 func hamrpassArgHint(m Model) []argOption {
 	_, rest, _ := strings.Cut(m.ta.Value(), " ")
 	rest = strings.TrimLeft(rest, " ")
@@ -304,11 +270,10 @@ func hamrpassArgHint(m Model) []argOption {
 	return []argOption{{value: rest, description: mark + hint}}
 }
 
-// cmdHamrpass: `/hamrpass` shows status + how-to, `/hamrpass <key>` validates
-// the key, saves it on the managed `hamrpass` profile, switches active to
-// hamrpass, and pings the backend so the next render reflects reachability.
-// Validation lives in hamrpassValidate so the popover hint and the inline
-// error line stay in lockstep.
+// cmdHamrpass: `/hamrpass` shows status + how-to, `/hamrpass <key>` validates,
+// saves the key on the managed hamrpass profile, switches active, and pings the
+// backend. Validation lives in hamrpassValidate so the popover hint and the
+// inline error stay in lockstep.
 func (m Model) cmdHamrpass(args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
 		m.printHamrpassStatus()
@@ -326,9 +291,7 @@ func (m Model) cmdHamrpass(args []string) (tea.Model, tea.Cmd) {
 	return m, m.activateHamrpass(key)
 }
 
-// printHamrpassStatus emits the status + how-to block. Extracted from
-// cmdHamrpass so the no-args path stays readable next to the activation
-// switch above it.
+// printHamrpassStatus emits the status + how-to block (the no-args path).
 func (m *Model) printHamrpassStatus() {
 	hp, ok := m.cfg.Models["hamrpass"]
 	status := "unset"
@@ -356,12 +319,10 @@ func (m *Model) printHamrpassStatus() {
 	m.appendLine(styleDim.Render("Once set, the remaining pass percentage appears in the status bar."))
 }
 
-// activateHamrpass writes the key onto the hamrpass profile (creating
-// the entry from canonical seed values if the user has hidden it from
-// config.yaml), switches active, rebuilds the llm client, and triggers
-// the shared activation confirmation (probe path, since hamrpass always
-// has a key after this point). Pulled out of cmdHamrpass so the
-// validation switch up top reads as a clean gate, with side effects below.
+// activateHamrpass writes the key onto the hamrpass profile (seeding the entry
+// if the user removed it from config.yaml), switches active, rebuilds the
+// client, and runs the shared confirmation (probe path, since hamrpass now has
+// a key).
 func (m *Model) activateHamrpass(key string) tea.Cmd {
 	hp := m.cfg.EnsureHamrpass()
 	hp.Key = key

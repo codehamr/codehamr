@@ -7,13 +7,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// popoverOpen returns true when the slash-autocomplete popover should render
-// and consume ↑/↓/Tab/Esc. Closed state is every other moment.
+// popoverOpen reports whether the slash-autocomplete popover should render
+// and consume ↑/↓/Tab/Esc.
 func (m Model) popoverOpen() bool { return m.suggestOpen }
 
 // currentSuggestion returns the highlighted popover row, or false when the
-// popover is closed or empty. Surfaces the "look at the popover selection"
-// pattern that handleEnter needs in three places.
+// popover is closed or empty.
 func (m Model) currentSuggestion() (argOption, bool) {
 	if !m.suggestOpen || len(m.suggest) == 0 {
 		return argOption{}, false
@@ -30,11 +29,10 @@ func (m Model) popoverMoveSelection(delta int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// refreshSuggest recomputes the popover from the current textarea content.
-// Two levels share this one entry point — command level before the first
-// space, argument level after it. When preferred is non-empty the selection
-// is forced to land on that value if it still appears in the refreshed list
-// (used after a keep-open Enter so the cursor stays on the row just confirmed).
+// refreshSuggest recomputes the popover from the textarea: command level before
+// the first space, argument level after it. A non-empty preferred forces the
+// selection onto that value when it survives the refresh — keeps the cursor on
+// the row a keep-open Enter just confirmed.
 func (m *Model) refreshSuggest(preferred string) {
 	text := m.ta.Value()
 	if strings.Contains(text, "\n") || !strings.HasPrefix(text, "/") {
@@ -59,12 +57,9 @@ func (m *Model) refreshSuggest(preferred string) {
 		m.closePopover()
 		return
 	}
-	// Refresh cfg from disk on the cmd→arg transition (or when switching
-	// between different commands at arg-level) so suggestion lists like
-	// /models <name> reflect external edits before the user submits. Silent
-	// on Bootstrap error — runSlash will surface the warning on actual
-	// submit, which avoids spamming a broken-config warning on every
-	// keystroke during slash typing.
+	// Reload cfg on the cmd→arg transition (or a different arg-level command) so
+	// lists like /models <name> reflect external edits before submit. Errors are
+	// silent — runSlash surfaces them on submit, not on every keystroke.
 	if !m.suggestArgLevel || m.activeCmd != cmdName {
 		_ = m.reloadConfigFromDisk()
 	}
@@ -78,10 +73,8 @@ func (m *Model) refreshSuggest(preferred string) {
 	m.setPopover(ms, true, cmdName, preferred)
 }
 
-// setPopover swaps in a new set of suggestions. Selection priority: the row
-// matching preferred if non-empty (used after a keep-open Enter to hold the
-// cursor on the value the user just confirmed), else the `current` row (e.g.
-// the active profile), else the first row.
+// setPopover swaps in a new suggestion set. Selection priority: preferred row,
+// else the current row (e.g. active profile), else the first.
 func (m *Model) setPopover(ms []argOption, argLevel bool, cmdName, preferred string) {
 	if len(ms) == 0 {
 		m.closePopover()
@@ -94,8 +87,8 @@ func (m *Model) setPopover(ms []argOption, argLevel bool, cmdName, preferred str
 	m.suggestIdx = selectInitialIdx(ms, preferred)
 }
 
-// selectInitialIdx picks the starting row when a popover opens. Preferred
-// wins if present, else the row marked current, else the first row.
+// selectInitialIdx picks the starting row: preferred, else the current row,
+// else the first.
 func selectInitialIdx(ms []argOption, preferred string) int {
 	if preferred != "" {
 		for i, o := range ms {
@@ -120,8 +113,8 @@ func (m *Model) closePopover() {
 	m.activeCmd = ""
 }
 
-// popoverHeight is the number of rows the popover occupies in View(). 0 when
-// closed, capped so the viewport keeps breathing room.
+// popoverHeight is the rows the popover occupies in View(): 0 when closed,
+// capped at popoverCap to leave the viewport breathing room.
 func (m Model) popoverHeight() int {
 	if !m.suggestOpen {
 		return 0
@@ -129,21 +122,17 @@ func (m Model) popoverHeight() int {
 	return min(len(m.suggest), popoverCap)
 }
 
-// renderPopover draws the suggestion list: value flush left, description
-// right aligned to the popover width, one row per suggestion. Selection is a
-// colour change — bold + accent orange — via stylePopoverSelected; the
-// "current" row (e.g. the active profile) is bold, no colour. No marker, no
-// background, no box: the list reads as text with a highlighted row, which
-// is the cleanest thing the terminal can render.
+// renderPopover draws the suggestion list: value flush left, description right
+// aligned, one row each. Selection is a colour change (stylePopoverSelected);
+// the current row is bold, no colour. No marker/background/box — plain text
+// with a highlighted row renders cleanest in the terminal.
 func (m Model) renderPopover() string {
 	if !m.suggestOpen {
 		return ""
 	}
-	// Window the rows around the selection: with more suggestions than fit
-	// (popoverCap), a selection that scrolled past the first window must
-	// still be visible — otherwise the highlighted row is off-screen and the
-	// user commits a row they can't see. start slides just enough to keep
-	// suggestIdx inside the [start, start+h) band.
+	// Window the rows around the selection: when suggestions exceed popoverCap,
+	// slide start just enough to keep suggestIdx inside [start, start+h) — else
+	// the highlighted row is off-screen and the user commits a row they can't see.
 	h := m.popoverHeight()
 	start := 0
 	if m.suggestIdx >= h {

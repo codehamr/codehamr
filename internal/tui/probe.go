@@ -12,17 +12,14 @@ import (
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
-// probeTimeout caps the activation hello-world request. Long enough that a
-// cold cloud route can finish, short enough that a stuck backend doesn't
-// leave the user staring at "▶ probing" forever.
+// probeTimeout caps the activation hello-world request: long enough for a cold
+// cloud route, short enough that a stuck backend doesn't hang "▶ probing".
 const probeTimeout = 15 * time.Second
 
-// probeMsg carries the outcome of a one-off Probe (hello-world chat) used
-// at activation time to validate URL+model+key in one round trip and harvest
-// the live context window from the response headers. profile is the name
-// the activation was targeted at — recorded explicitly because the user
-// could /models switch again before the probe returns, and we don't want a
-// late probe to overwrite the wrong profile's live window.
+// probeMsg carries the outcome of an activation-time Probe (hello-world chat):
+// validates URL+model+key in one round trip and harvests the live context
+// window from response headers. profile is tagged explicitly so a late probe
+// can't overwrite the wrong profile's window after a /models switch.
 type probeMsg struct {
 	profile       string
 	contextWindow int
@@ -31,11 +28,9 @@ type probeMsg struct {
 	err           error
 }
 
-// probeBackend wraps llm.Client.Probe in a tea.Cmd. Bounded by probeTimeout
-// so a hung backend never freezes the activation flow. silent=true skips
-// the "✓ active" scrollback line — used by the startup probe so it only
-// initialises the live budget/ctx values without echoing an activation
-// banner the user didn't ask for.
+// probeBackend wraps llm.Client.Probe in a tea.Cmd, bounded by probeTimeout so
+// a hung backend never freezes activation. silent=true (startup probe) skips
+// the "✓ active" banner, just seeding live budget/ctx values.
 func probeBackend(cli *llm.Client, profileName string, silent bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
@@ -51,41 +46,29 @@ func probeBackend(cli *llm.Client, profileName string, silent bool) tea.Cmd {
 	}
 }
 
-// handleProbe consumes the result of an activation-time Probe. On success
-// it stores the live context window for the targeted profile and prints
-// the final activation line with the live ctx suffix. On failure it
-// surfaces the error inline (key rejected, unreachable, etc.) and leaves
-// the active profile as set — the user can /models back if they want.
-// Late probes whose profile is no longer active still update
-// liveContextSize so the value is ready next time the user switches back.
+// handleProbe consumes an activation-time Probe result. Success stores the live
+// context window and prints the activation line; failure surfaces the error
+// inline and leaves the active profile set. Late probes for a no-longer-active
+// profile still update liveContextSize, ready for when the user switches back.
 //
-// Connection-state mutations (m.connected, m.budget) are gated on
-// msg.profile == m.cfg.Active: without this gate, a user who /models'd
-// to b while a probe for a was still in flight would see the live "b"
-// reachability indicator briefly flip based on the stale "a" probe outcome
-// — exactly the same staleness class pingMsg dispatch already guards
-// against via its baseURL tag.
+// Connection-state mutations (m.connected, m.budget) are gated on the probe's
+// profile still being active, so a probe for a finishing after the user
+// /models'd to b can't flip b's reachability indicator on a's stale outcome.
 func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	active := msg.profile == m.cfg.Active
 	if msg.err != nil {
 		if active {
 			m.connected = false
-			// A 402 probe carries the depleted budget snapshot (Set=true,
-			// Remaining=0) alongside the error. Without this update the
-			// status bar shows no "% pass" segment until the user's first
-			// chat call also 402s — applyError updates the budget there,
-			// but a startup probe to an already-depleted pass would leave
-			// the segment blank in between, which is worse signal than
-			// painting the zero outright.
+			// A 402 carries the depleted budget snapshot (Set=true, Remaining=0).
+			// Paint it now; otherwise the status bar shows no "% pass" segment
+			// until the first chat call also 402s.
 			if msg.budget.Set {
 				m.budget = msg.budget
 			}
 		}
-		// Silent startup probes don't print activation banners on success,
-		// so they shouldn't print error banners on failure either —
-		// otherwise an offline launch greets the user with a noisy "⚠ probe"
-		// line before they've done anything. The connected=false alone is
-		// enough; the next user action will surface the real failure.
+		// Silent startup probes print no banner either way; an offline launch
+		// shouldn't greet the user with "⚠ probe". connected=false suffices —
+		// the next user action surfaces the real failure.
 		if !msg.silent {
 			m.appendLine(styleError.Render("⚠ probe " + msg.profile + ": " + probeErrorMessage(msg.err)))
 		}
@@ -99,20 +82,16 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	}
 	p, ok := m.cfg.Models[msg.profile]
 	if !ok {
-		// Profile vanished between probe dispatch and return (user hand-
-		// edited config or /models switched and the old profile got
-		// pruned). Skip the cache write — leaving an orphan key would
-		// pile up on every probe-of-a-stale-profile in long sessions.
+		// Profile vanished between dispatch and return (hand-edited config or
+		// pruned by /models). Skip the cache write — an orphan key would
+		// accumulate across a long session.
 		return m, nil
 	}
 	if msg.contextWindow > 0 {
 		m.liveContextSize[msg.profile] = msg.contextWindow
 	}
-	// Suppress the activation banner for stale probes: a probe whose
-	// profile is no longer the active one (user /models'd away mid-flight)
-	// must not print "✓ active: <profile>" — the profile in the banner is
-	// not active. liveContextSize is still updated above so the value is
-	// ready next time the user switches back.
+	// Don't print "✓ active: <profile>" for a stale probe whose profile is no
+	// longer active — that profile isn't active. (liveContextSize is set above.)
 	if msg.silent || !active {
 		return m, nil
 	}
@@ -125,9 +104,8 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// probeErrorMessage maps the cloud sentinel errors to human strings so the
-// activation line carries a useful hint instead of a stack-trace-style
-// wrap. Falls back to the raw error string for anything unrecognised.
+// probeErrorMessage maps cloud sentinel errors to human hints for the
+// activation line. Falls back to the raw error string for anything else.
 func probeErrorMessage(err error) string {
 	switch {
 	case errors.Is(err, cloud.ErrUnauthorized):

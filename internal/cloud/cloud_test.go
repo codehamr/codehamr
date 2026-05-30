@@ -8,11 +8,9 @@ import (
 	"time"
 )
 
-// TestReachableHitsV1Models pins the heartbeat path. The earlier probe was
-// GET / which Ollama served (200) but vLLM did not (no route → request
-// blocks behind the inference loop, 2 s timeout, spurious "!" in the
-// status bar). /v1/models is the OpenAI-standard listing endpoint and is
-// universally served by every keyless backend we support.
+// TestReachableHitsV1Models pins the heartbeat path: /v1/models, the
+// OpenAI-standard listing endpoint every backend serves. Probing GET /
+// instead could block behind a backend's inference loop until timeout.
 func TestReachableHitsV1Models(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,10 +29,8 @@ func TestReachableHitsV1Models(t *testing.T) {
 	}
 }
 
-// TestReachableTreatsNon2xxAsReachable confirms the documented contract:
-// any HTTP response counts as reachable, even 404 / 401. Only transport
-// errors and timeouts (covered by the Go stdlib client error path) mean
-// disconnected.
+// TestReachableTreatsNon2xxAsReachable: any HTTP response counts as
+// reachable (even 404/401); only transport errors and timeouts mean down.
 func TestReachableTreatsNon2xxAsReachable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -86,11 +82,9 @@ func TestFromHeadersClampsAndParses(t *testing.T) {
 	}
 }
 
-// TestFromHeadersRejectsNaNAndInf is the regression: strconv.ParseFloat
-// happily returns NaN/±Inf without an error, all NaN comparisons evaluate
-// to false (so the [0,1] clamp is a no-op), and the resulting "valid"
-// BudgetStatus then renders through int(NaN*100+0.5) → MinInt64 in the
-// status bar. Both must collapse to the same zero value as a missing header.
+// TestFromHeadersRejectsNaNAndInf: ParseFloat accepts NaN/±Inf without
+// error and the [0,1] clamp is a no-op against NaN, so they'd render as
+// int(NaN*100+0.5) → MinInt64. Both must collapse to the missing-header zero.
 func TestFromHeadersRejectsNaNAndInf(t *testing.T) {
 	cases := []string{"NaN", "+Inf", "-Inf", "Infinity"}
 	for _, raw := range cases {

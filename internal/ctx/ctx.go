@@ -1,5 +1,5 @@
-// Package ctx owns conversation messages, tool output truncation, and the
-// newest-first packing rule.
+// Package ctx owns conversation messages, tool-output truncation, and
+// newest-first packing.
 package ctx
 
 import (
@@ -31,7 +31,7 @@ type Message struct {
 	ToolName   string     `json:"name,omitempty"`
 }
 
-// Tokens is the char/4 heuristic from the spec — good enough for budgeting.
+// Tokens approximates token count as char/4 — good enough for budgeting.
 func Tokens(s string) int { return (len(s) + 3) / 4 }
 
 func (m Message) Tokens() int {
@@ -48,22 +48,18 @@ func (m Message) Tokens() int {
 const (
 	ToolOutputCap = 6000
 	ToolHeadTail  = 2000
-	// FixedSystem reserves budget for the embedded system prompt + working-
-	// directory anchor (see tui.buildSystem). PROMPT_SYS.md is currently
-	// ~2335 tokens after the per-message overhead; 2600 keeps a small
-	// buffer so an absent-minded prompt edit doesn't push the packer into
-	// silent over-budget territory on small-ctx (32k/64k) profiles. A test
-	// in internal/tui pins this against the live embedded prompt — bump
-	// here when the test fails, do not relax the assertion.
+	// FixedSystem reserves budget for the embedded prompt + working-dir anchor
+	// (see tui.buildSystem). PROMPT_SYS.md is ~2335 tokens; the buffer to 2600
+	// keeps prompt edits from silently over-budgeting small-ctx profiles. A tui
+	// test pins this against the live prompt — bump here when it fails, never
+	// relax the assertion.
 	FixedSystem = 2600
 	FixedTools  = 1500
 )
 
-// ResponseReserve is the slice of the context window Budget keeps free for
-// the model's response. Scales as ctxSize/8 so big-context reasoning models
-// get adequate room: at 262k that's 32k — exactly the Qwen3-class
-// thinking-mode default — at 1M it's 125k. Floored at 8k so 32k/64k-class
-// profiles keep the legacy reserve and don't collapse history to nothing.
+// ResponseReserve is the slice Budget keeps free for the model's response.
+// Scales as ctxSize/8 so reasoning models get room (262k→32k, 1M→125k),
+// floored at 8k so small-ctx profiles don't collapse history to nothing.
 func ResponseReserve(ctxSize int) int {
 	if r := ctxSize / 8; r > 8000 {
 		return r
@@ -71,12 +67,10 @@ func ResponseReserve(ctxSize int) int {
 	return 8000
 }
 
-// Truncate collapses oversized tool outputs to first 2k + last 2k tokens.
-// Inputs at or under 6k tokens pass through unchanged. The 8k/8k byte
-// slices never overlap because total > 6k tokens means len(out) > 24k
-// bytes, comfortably more than the 16k we keep. Slice boundaries are
-// snapped to the nearest valid UTF-8 rune start so a non-ASCII output
-// (umlauts, box drawing, emoji) never produces invalid bytes mid-stream.
+// Truncate collapses oversized tool outputs to first 2k + last 2k tokens;
+// inputs at or under 6k pass through unchanged. Head/tail can't overlap:
+// >6k tokens means >24k bytes, well over the 16k kept. Boundaries snap to a
+// valid UTF-8 rune start so non-ASCII output never breaks mid-sequence.
 func Truncate(out string) string {
 	total := Tokens(out)
 	if total <= ToolOutputCap {
@@ -90,8 +84,8 @@ func Truncate(out string) string {
 	return out[:head] + marker + out[tail:]
 }
 
-// runeBoundaryDown walks i left until out[i] starts a rune, so out[:i]
-// never ends mid-sequence. Safe for i == len(out).
+// runeBoundaryDown walks i left to a rune start so out[:i] never ends
+// mid-sequence. Safe for i == len(out).
 func runeBoundaryDown(out string, i int) int {
 	if i >= len(out) {
 		return len(out)
@@ -102,8 +96,8 @@ func runeBoundaryDown(out string, i int) int {
 	return i
 }
 
-// runeBoundaryUp walks i right until out[i] starts a rune, so out[i:]
-// never starts mid-sequence. Safe for i <= 0.
+// runeBoundaryUp walks i right to a rune start so out[i:] never starts
+// mid-sequence. Safe for i <= 0.
 func runeBoundaryUp(out string, i int) int {
 	if i <= 0 {
 		return 0
@@ -121,14 +115,9 @@ type PackResult struct {
 }
 
 // Pack keeps whole messages newest-first until the budget is full, then
-// returns them in chronological order. The newest message is always kept
-// even if it alone exceeds the budget.
-//
-// A second pass drops tool messages whose tool_call_id never appears in a
-// preceding assistant's tool_calls: OpenAI-compatible servers reject a tool
-// message that can't be paired with its request, so when packing cuts an
-// assistant.tool_calls ancestor off the top of the window we'd rather lose
-// the stale response than the entire chat request.
+// returns them chronologically. The newest message is always kept, even if it
+// alone exceeds the budget. A second pass (dropOrphanTools) drops tool
+// messages whose assistant.tool_calls ancestor got trimmed off the top.
 func Pack(history []Message, budget int) PackResult {
 	kept := make([]Message, 0, len(history))
 	used := 0
@@ -150,16 +139,13 @@ func Pack(history []Message, budget int) PackResult {
 }
 
 // dropOrphanTools removes tool messages whose tool_call_id has no matching
-// assistant.tool_calls entry earlier in the kept slice. Happens when
-// budget-trimming cut the assistant that issued the call; sending the
-// orphaned tool response on its own returns a 400 from every OpenAI-
-// compatible backend ("tool message without preceding tool_calls").
+// assistant.tool_calls entry earlier in the slice — sending one alone 400s on
+// every OpenAI-compatible backend ("tool message without preceding
+// tool_calls").
 //
-// Empty IDs are treated as orphans on both ends: a server bug that ships an
-// assistant.tool_call with empty `id` would otherwise let *every* subsequent
-// empty-ToolCallID tool message ride through `seen[""] = true`, which is
-// exactly the 400 we set out to prevent. An unidentifiable tool message has
-// no legitimate pairing — drop it.
+// Empty IDs are orphans on both ends: otherwise one empty-id assistant call
+// would let every empty-id tool message ride through seen[""], the exact 400
+// we guard against. An unidentifiable tool message has no valid pairing.
 func dropOrphanTools(kept []Message) []Message {
 	seen := map[string]bool{}
 	out := kept[:0]

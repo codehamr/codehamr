@@ -7,36 +7,30 @@ import (
 	"strconv"
 )
 
-// Prompt history persists across restarts in .codehamr/history alongside
-// the project's other state, so recall is per-project (cd-stable) and
-// /clear can wipe it as part of the project-scoped reset. One
-// strconv-quoted entry per line keeps the format dumb (cat-friendly),
-// handles multi-line prompts without a separator, and lets a corrupt line
-// be skipped without poisoning the rest of the file.
+// Prompt history persists in .codehamr/history, so recall is per-project
+// (cd-stable) and /clear wipes it with the rest of the reset. One
+// strconv-quoted entry per line keeps the format cat-friendly, handles
+// multi-line prompts without a separator, and lets a corrupt line be
+// skipped without poisoning the rest.
 const (
 	historyFileName   = "history"
 	historyMaxEntries = 500
-	// historyMaxEntryBytes is the sane-prompt size cap on the (unquoted)
-	// value. Pasted attachments arrive as chips in the live UI but the
-	// on-disk history still stores their expanded text, so without this cap
-	// a multi-megabyte log paste would balloon the history file every submit.
-	// 256 KiB comfortably holds any sane prompt; longer pastes are simply
-	// not recalled, which is the right tradeoff for a dumb cat-friendly store.
+	// Unquoted-value size cap. History stores chips' expanded text, so without
+	// this a multi-megabyte log paste would balloon the file every submit;
+	// longer pastes simply aren't recalled.
 	historyMaxEntryBytes = 256 * 1024
-	// historyScannerMax is the per-line token ceiling for the bufio scanners
-	// that read the file back (loadPromptHistory, countHistoryLines). A line
-	// at or above this length is dropped by bufio with ErrTooLong, which also
-	// halts the scan and loses every later entry — so appendPromptHistory
-	// must never write a quoted line this long (see the guard there).
+	// Per-line token ceiling for the bufio scanners that read the file back. A
+	// line at or above this is dropped with ErrTooLong AND halts the scan,
+	// losing every later entry — so appendPromptHistory must never write a
+	// quoted line this long.
 	historyScannerMax = 1024 * 1024
 )
 
 func historyPath(dir string) string { return filepath.Join(dir, historyFileName) }
 
-// loadPromptHistory returns every saved prompt as a chip-less promptEntry,
-// oldest first to match the in-memory append order so historyUp/Down walk
-// the same direction whether entries were just typed or came off disk. A
-// missing file is the first-run state, not an error.
+// loadPromptHistory returns every saved prompt oldest-first, matching the
+// in-memory append order so historyUp/Down walk the same direction for
+// typed and on-disk entries. A missing file is first-run, not an error.
 func loadPromptHistory(dir string) []promptEntry {
 	f, err := os.Open(historyPath(dir))
 	if err != nil {
@@ -45,9 +39,8 @@ func loadPromptHistory(dir string) []promptEntry {
 	defer f.Close()
 	var out []promptEntry
 	sc := bufio.NewScanner(f)
-	// One prompt may carry a pasted log of tens of KB; raise the per-line
-	// cap well past Scanner's 64KB default so we don't silently drop the
-	// tail of a long entry on load.
+	// A prompt may carry a pasted log of tens of KB; raise the per-line cap
+	// past Scanner's 64KB default so we don't drop a long entry's tail.
 	sc.Buffer(make([]byte, 64*1024), historyScannerMax)
 	for sc.Scan() {
 		v, err := strconv.Unquote(sc.Text())
@@ -59,19 +52,15 @@ func loadPromptHistory(dir string) []promptEntry {
 	return out
 }
 
-// appendPromptHistory writes value as one more entry, trimming the file to
-// historyMaxEntries so on-disk growth stays bounded. Empty prompts are
-// skipped so stray ↵ presses don't pollute recall, and entries longer
-// than historyMaxEntryBytes are dropped on the floor (recall would have
-// silently failed anyway thanks to the 1 MiB scanner cap; declining to
-// store is the honest answer).
+// appendPromptHistory writes value as one more entry, trimming to
+// historyMaxEntries to bound growth. Empty prompts are skipped so stray ↵
+// presses don't pollute recall; entries over historyMaxEntryBytes are
+// dropped (recall would fail at the scanner cap anyway).
 //
-// The append uses O_APPEND so two codehamr processes in the same project
-// can each add a line without one's "load + rewrite" silently eating the
-// other's submit. The trim-to-historyMaxEntries pass is wrapped in
-// best-effort: on any IO error during the rewrite we leave the appended
-// file alone — the user keeps their newest entries, and the next start
-// will trim back down to the limit on the natural rewrite path.
+// O_APPEND so two codehamr processes in the same project can each add a
+// line without one's load+rewrite eating the other's submit. The trim is
+// best-effort: an IO error during rewrite leaves the appended file as-is —
+// the next start trims it back down.
 func appendPromptHistory(dir, value string) error {
 	if value == "" {
 		return nil
@@ -79,12 +68,11 @@ func appendPromptHistory(dir, value string) error {
 	if len(value) > historyMaxEntryBytes {
 		return nil
 	}
-	// strconv.Quote expands control / invalid bytes to \xNN (4× each), so a
-	// value that clears the unquoted cap above can still quote to a line at or
-	// past historyScannerMax. Such a line is silently dropped on the next load
-	// AND halts the scan, losing every newer entry with it. Decline to store
-	// what the loader can't read back. (bufio needs the token strictly below
-	// the buffer max, hence >=.)
+	// Quote expands control/invalid bytes to \xNN (4× each), so a value under
+	// the unquoted cap can still quote past historyScannerMax — and such a line
+	// halts the scan, losing every newer entry. Decline to store what the
+	// loader can't read back. (bufio needs the token strictly below the buffer
+	// max, hence >=.)
 	quoted := strconv.Quote(value)
 	if len(quoted) >= historyScannerMax {
 		return nil
@@ -102,9 +90,7 @@ func appendPromptHistory(dir, value string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	// Lazy trim: scan the file's line count after each append and rewrite
-	// only when it has grown past historyMaxEntries. countHistoryLines is
-	// O(file) but bounded by historyMaxEntryBytes × historyMaxEntries.
+	// Lazy trim: rewrite only once the count exceeds historyMaxEntries.
 	count, err := countHistoryLines(path)
 	if err != nil || count <= historyMaxEntries {
 		return nil
@@ -118,15 +104,14 @@ func appendPromptHistory(dir, value string) error {
 		buf = append(buf, strconv.Quote(e.display)...)
 		buf = append(buf, '\n')
 	}
-	// Best-effort rewrite — failures here keep the over-cap-but-correct
-	// file rather than reporting an error that would obscure the
-	// successful append above.
+	// Best-effort: a failure keeps the over-cap-but-correct file rather than
+	// reporting an error that would obscure the successful append above.
 	_ = os.WriteFile(path, buf, 0o600)
 	return nil
 }
 
-// countHistoryLines tallies newline-terminated lines without parsing them
-// — fast path for the trim-decision in appendPromptHistory.
+// countHistoryLines tallies lines without parsing them — fast path for the
+// trim decision in appendPromptHistory.
 func countHistoryLines(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -142,9 +127,8 @@ func countHistoryLines(path string) (int, error) {
 	return n, sc.Err()
 }
 
-// clearPromptHistory removes the on-disk file so /clear's full-reset
-// gesture also wipes prompt recall. A missing file is not an error — the
-// caller's intent (an empty history) is already satisfied.
+// clearPromptHistory removes the on-disk file so /clear also wipes recall.
+// A missing file is not an error — the empty-history intent already holds.
 func clearPromptHistory(dir string) error {
 	err := os.Remove(historyPath(dir))
 	if os.IsNotExist(err) {

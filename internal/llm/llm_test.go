@@ -25,8 +25,8 @@ func collect(ch <-chan Event) []Event {
 	return evs
 }
 
-// sseOK writes an OpenAI-style streamed response with the given chunks and a
-// [DONE] terminator. The budget header travels on the 200 like in production.
+// sseOK writes an OpenAI-style streamed response plus a [DONE] terminator. The
+// budget header travels on the 200 like in production.
 func sseOK(w http.ResponseWriter, chunks []string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Budget-Remaining", "0.73")
@@ -36,7 +36,7 @@ func sseOK(w http.ResponseWriter, chunks []string) {
 	fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
-// TestChatStreamsContent: two content deltas merge into one final string.
+// TestChatStreamsContent: content deltas merge into one final string.
 func TestChatStreamsContent(t *testing.T) {
 	var gotAuth, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,9 +91,8 @@ func TestChatStreamsContent(t *testing.T) {
 	}
 }
 
-// TestChatToolCall: OpenAI tool_calls in an assistant delta emit an
-// EventToolCall AND are carried in EventDone.Final.ToolCalls so the next
-// turn can replay the assistant message into the conversation history.
+// TestChatToolCall: tool_calls in a delta emit EventToolCall and ride along in
+// EventDone.Final.ToolCalls so the next turn can replay the assistant message.
 func TestChatToolCall(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -124,9 +123,8 @@ func TestChatToolCall(t *testing.T) {
 	}
 }
 
-// TestChatToolCallFragmentedArgs: OpenAI streams the `arguments` field as
-// a JSON string that arrives in fragments, each invalid on its own. The
-// client must accumulate raw and parse exactly once at finish_reason.
+// TestChatToolCallFragmentedArgs: `arguments` arrives as JSON fragments, each
+// invalid alone. The client must accumulate raw and parse once at finish_reason.
 func TestChatToolCallFragmentedArgs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -157,8 +155,7 @@ func TestChatToolCallFragmentedArgs(t *testing.T) {
 }
 
 // TestChatToolCallMultipleByIndex: two tool calls interleaved across chunks.
-// The client must route each fragment to the correct slot via `index`, not
-// via slice position within a chunk.
+// Each fragment must route to its slot by `index`, not by slice position.
 func TestChatToolCallMultipleByIndex(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -192,10 +189,9 @@ func TestChatToolCallMultipleByIndex(t *testing.T) {
 	}
 }
 
-// TestChatDispatchesToolCallsOnFinishStop: Ollama's /v1 shim sometimes
-// emits finish_reason="stop" even when tool_calls were just streamed. The
-// client must still emit EventToolCall — otherwise the call vanishes into
-// the void and the agent stares at an empty turn with nothing to do.
+// TestChatDispatchesToolCallsOnFinishStop: Ollama's /v1 shim sometimes emits
+// finish_reason="stop" even after streaming tool_calls. The client must still
+// emit EventToolCall, or the call vanishes and the agent faces an empty turn.
 func TestChatDispatchesToolCallsOnFinishStop(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -226,11 +222,10 @@ func TestChatDispatchesToolCallsOnFinishStop(t *testing.T) {
 	}
 }
 
-// TestChatToolCallLateIDPreserved: OpenAI's spec ships the tool_call `id`
-// in the first fragment of a call, but a sloppy provider may delay it. The
-// client must update slot.id on any non-empty value (same forgiveness it
-// already has for `name`) — otherwise the resulting assistant.tool_calls[0].id
-// is "" and the subsequent /v1 request 400s on the unpaired tool message.
+// TestChatToolCallLateIDPreserved: spec ships the tool_call `id` in the first
+// fragment, but a sloppy provider may delay it. The client must update slot.id
+// on any non-empty value (same forgiveness as `name`), else the id stays "" and
+// the next /v1 request 400s on the unpaired tool message.
 func TestChatToolCallLateIDPreserved(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -255,10 +250,9 @@ func TestChatToolCallLateIDPreserved(t *testing.T) {
 	}
 }
 
-// TestChatToolCallMalformedArgsPreservesMarker: when the streamed
-// `arguments` string isn't valid JSON (provider bug), the client must not
-// silently hand the tool an empty args map — it surfaces a sentinel key
-// so the resulting tool-result log at least names what went wrong.
+// TestChatToolCallMalformedArgsPreservesMarker: on invalid `arguments` JSON
+// (provider bug), the client surfaces a sentinel key rather than an empty args
+// map, so the tool-result log names what went wrong.
 func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -282,9 +276,8 @@ func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 	}
 }
 
-// TestToWireAlwaysSendsContent: silent tool results (empty stdout, e.g. from a
-// heredoc write) must still serialize "content":"" — Ollama's /v1 shim 400s
-// if the field is absent or null.
+// TestToWireAlwaysSendsContent: silent tool results (empty stdout) must still
+// serialize "content":"" — Ollama's /v1 shim 400s if the field is absent or null.
 func TestToWireAlwaysSendsContent(t *testing.T) {
 	msgs := []chmctx.Message{
 		{Role: chmctx.RoleAssistant, Content: "", ToolCalls: []chmctx.ToolCall{
@@ -305,10 +298,9 @@ func TestToWireAlwaysSendsContent(t *testing.T) {
 	}
 }
 
-// TestChatSendsStreamIncludeUsage: OpenAI-compatible servers emit the usage
-// block (completion_tokens) only when `stream_options.include_usage:true` is
-// present in the request. Without it the per-turn token counter sits at 0.
-// Every Chat call must ship the flag.
+// TestChatSendsStreamIncludeUsage: servers emit the usage block only when
+// `stream_options.include_usage:true` is in the request; without it the per-turn
+// token counter sits at 0. Every Chat call must ship the flag.
 func TestChatSendsStreamIncludeUsage(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,9 +315,8 @@ func TestChatSendsStreamIncludeUsage(t *testing.T) {
 	}
 }
 
-// TestChatReadsUsageTokens: the client reports tokens from the server's
-// `usage.completion_tokens` field. Content length is irrelevant — we trust
-// what the backend reports.
+// TestChatReadsUsageTokens: tokens come from `usage.completion_tokens`, not
+// content length — we trust what the backend reports.
 func TestChatReadsUsageTokens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -344,15 +335,12 @@ func TestChatReadsUsageTokens(t *testing.T) {
 	}
 }
 
-// TestSendEventUnblocksOnCancel pins the anti-wedge invariant on sendEvent
-// (llm.go:273-280): once the parent context is cancelled, a send to a channel
-// nobody is draining must abort via the <-parent.Done() arm instead of
-// blocking the stream goroutine forever. This is the only path that exercises
-// that arm. The regression — reverting to a plain `out <- e` — would leak the
-// Chat goroutine on Ctrl+C against a full buffer (see the WHY comment on
-// sendEvent and the "Per-turn context cancellation" invariant in CLAUDE.md);
-// under that regression this test's goroutine never returns and the deadline
-// below fires.
+// TestSendEventUnblocksOnCancel pins sendEvent's anti-wedge invariant: once the
+// parent context is cancelled, a send to an undrained channel must abort via the
+// <-parent.Done() arm instead of blocking the stream goroutine forever. This is
+// the only path exercising that arm. A regression to a plain `out <- e` leaks the
+// Chat goroutine on Ctrl+C against a full buffer; the goroutine never returns and
+// the deadline below fires.
 func TestSendEventUnblocksOnCancel(t *testing.T) {
 	out := make(chan Event) // unbuffered, no reader → the send blocks until cancel
 	ctx, cancel := context.WithCancel(context.Background())
@@ -387,9 +375,8 @@ func TestChat401(t *testing.T) {
 	}
 }
 
-// TestChat402: pass exhaustion surfaces as typed error and the budget
-// snapshot reports zero remaining so the UI can paint the depleted state
-// without waiting for the next response.
+// TestChat402: budget exhaustion surfaces as a typed error with the snapshot
+// reporting zero remaining, so the UI paints the depleted state immediately.
 func TestChat402(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)
@@ -418,7 +405,7 @@ func TestChatUnreachable(t *testing.T) {
 }
 
 // TestChatOtherHTTPError: non-2xx (not 401/402) surfaces as a generic error
-// with first line of body included in the message.
+// carrying only the first body line.
 func TestChatOtherHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -439,11 +426,10 @@ func TestChatOtherHTTPError(t *testing.T) {
 	}
 }
 
-// TestChatStructuredErrorPrefersProviderHint: codehamr.com's hamrpass proxy
-// wraps upstream errors in `{"error":{"message":"...","provider_hint":"..."}}`
-// and stashes the provider's user-facing diagnostic in `provider_hint`. The
-// client must surface that hint over the generic message so users see the
-// useful "retry shortly" text, not "upstream rate limited".
+// TestChatStructuredErrorPrefersProviderHint: the hamrpass proxy wraps upstream
+// errors as `{"error":{"message":...,"provider_hint":...}}`. The client must
+// surface provider_hint over message, so users see the useful "retry shortly"
+// text, not "upstream rate limited".
 func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -466,9 +452,8 @@ func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 	}
 }
 
-// TestChatStructuredErrorFallsBackToMessage: when the envelope carries only
-// `error.message` (no provider_hint), surface that — not the raw JSON blob
-// the user would otherwise see.
+// TestChatStructuredErrorFallsBackToMessage: with only `error.message` (no
+// provider_hint), surface that, not the raw JSON envelope.
 func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -489,12 +474,10 @@ func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 	}
 }
 
-// TestReasoningChunksAreEmitted: reasoning models (Qwen, o1, ...) stream
-// chain-of-thought text in `delta.reasoning` while the server is still
-// "thinking". Those chunks must be surfaced as EventReasoning rather than
-// dropped by the decoder, otherwise the UI freezes for the entire
-// reasoning phase. Reasoning text must NOT be folded into the assistant
-// content (it has no business being in history).
+// TestReasoningChunksAreEmitted: reasoning models stream chain-of-thought in
+// `delta.reasoning`. The decoder must surface these as EventReasoning (else the
+// UI freezes for the whole reasoning phase) and must NOT fold them into the
+// assistant content — reasoning has no business in history.
 func TestReasoningChunksAreEmitted(t *testing.T) {
 	chunks := []string{
 		`{"choices":[{"delta":{"reasoning":"Hmm"},"finish_reason":null}]}`,
@@ -534,12 +517,10 @@ func TestReasoningChunksAreEmitted(t *testing.T) {
 	}
 }
 
-// TestChatFallsBackWhenReasoningEffortRejected: OpenAI's gpt-5.5+ rejects
-// tools + reasoning_effort on /v1/chat/completions with a precise 400.
-// postChat must drop reasoning_effort for the rest of the Client's life
-// and retry once so the user's first turn still goes through. The flag is
-// sticky — subsequent turns must not resend reasoning_effort or we'd burn
-// a 400 on every prompt and tool call.
+// TestChatFallsBackWhenReasoningEffortRejected: gpt-5.5+ rejects tools +
+// reasoning_effort on /v1/chat/completions with a 400. postChat must drop the
+// field, retry once, and stay sticky for the Client's life — else every turn
+// burns a 400.
 func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -595,18 +576,15 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 }
 
 // TestProbeChatNoReasoningEffortIsRaceFree pins the atomic.Bool guard on
-// Client.noReasoningEffort. In production, the startup probe goroutine and
-// the first chat goroutine can run on the same *Client at the same time
-// (probe is fired by Init, chat starts when the user submits before the
-// probe returns). Both call postChat which reads the flag, and Chat may
-// write it on a 400 fallback. With a plain bool that's a Go data race;
-// running this test under -race must come back clean.
+// Client.noReasoningEffort. The startup probe and the first chat can run on the
+// same *Client concurrently (probe from Init, chat when the user submits early):
+// both read the flag via postChat, and a 400 fallback writes it. A plain bool
+// would be a data race; this must run clean under -race.
 func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		// Force the 400 → write c.noReasoningEffort branch on every chat
-		// that still ships reasoning_effort, so concurrent writes from
-		// multiple Chat goroutines exercise the same write path.
+		// Force the 400 → write-the-flag branch on every chat still shipping
+		// reasoning_effort, so concurrent Chat goroutines hit the write path.
 		if strings.Contains(string(b), `"reasoning_effort"`) {
 			w.WriteHeader(400)
 			fmt.Fprint(w, `{"error":{"message":"reasoning_effort not supported"}}`)
@@ -636,13 +614,10 @@ func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-// TestChatFallsBackWhenOllamaRejectsThinking: Ollama rejects
-// reasoning_effort on non-thinking models (e.g. qwen3-coder) with a 400
-// whose body says `<model> does not support thinking` — different shape
-// from OpenAI's reasoning_effort/not-supported message but the same
-// remedy. postChat must drop reasoning_effort, retry once, and stay
-// sticky for the rest of the Client's life so we don't re-trip the 400
-// every turn.
+// TestChatFallsBackWhenOllamaRejectsThinking: Ollama rejects reasoning_effort on
+// non-thinking models with a 400 saying `<model> does not support thinking` —
+// different shape from OpenAI's message, same remedy. postChat must drop the
+// field, retry once, and stay sticky so we don't re-trip the 400 every turn.
 func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -692,13 +667,11 @@ func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 	}
 }
 
-// TestNewHasNoHTTPTimeout pins the invariant that the streaming Client must
-// NOT set http.Client.Timeout. That field is end-to-end — it covers body
-// reads — and would kill a legitimately slow SSE stream with the
-// "context deadline exceeded … while reading body" abort on slow local
-// backends. Per-turn context cancellation (turnCtx in tui.Model) governs
-// request lifetime; this test stops a well-meaning future refactor from
-// silently reintroducing the wall-clock cap.
+// TestNewHasNoHTTPTimeout pins that the streaming Client must NOT set
+// http.Client.Timeout: that field is end-to-end (it covers body reads) and would
+// abort a legitimately slow SSE stream with "context deadline exceeded … while
+// reading body" on slow local backends. Per-turn context cancellation governs
+// request lifetime; this stops a refactor from reintroducing the wall-clock cap.
 func TestNewHasNoHTTPTimeout(t *testing.T) {
 	c := New("http://example.test", "model", "token")
 	if c.HTTP.Timeout != 0 {

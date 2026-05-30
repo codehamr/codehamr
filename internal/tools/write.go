@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 )
 
-// WriteFile writes content bytes exactly to path. Parent directories are
-// created as needed. Matches the bash convention: errors come back as part
-// of the output string, never as a Go error the caller must unwrap — so the
-// model sees the failure the same way it sees a non-zero bash exit.
+// WriteFile writes content to path, creating parent dirs. Errors return as
+// part of the output string (bash convention), never as a Go error — so the
+// model sees a write failure the way it sees a non-zero bash exit.
 func WriteFile(path, content string) string {
 	if path == "" {
 		return "(empty path)"
@@ -25,10 +24,9 @@ func WriteFile(path, content string) string {
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path)
 }
 
-// WriteFileSchema is the OpenAI tool definition for write_file — the second
-// local tool every profile exposes, sitting next to bash. The description
-// nudges the model toward write_file for any non-trivial file write, so the
-// heredoc-quoting failure mode stops happening.
+// WriteFileSchema is the OpenAI tool definition for write_file. The description
+// steers the model away from bash heredocs (shell-quoting failure mode) toward
+// write_file for any non-trivial file write.
 func WriteFileSchema() map[string]any {
 	return map[string]any{
 		"type": "function",

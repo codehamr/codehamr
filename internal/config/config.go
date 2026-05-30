@@ -1,7 +1,6 @@
 // Package config owns the .codehamr/ directory: config.yaml plus the
-// embedded default system prompt. The system prompt lives only in the
-// binary — never on disk — so users cannot tamper with it and every
-// codehamr release ships a guaranteed-consistent prompt.
+// embedded default system prompt. The prompt lives only in the binary —
+// never on disk — so it's untamperable and every release ships it consistent.
 package config
 
 import (
@@ -22,43 +21,34 @@ var DefaultSystemPrompt string
 
 const DirName = ".codehamr"
 
-// defaultContextSize is the floor Bootstrap coerces bogus context_size
-// values to. Matches the Default() local profile so a hand-edited config
-// that forgot the field behaves the same as a freshly-bootstrapped one.
-// 131072 = 128k tokens, the comfortable spot for the seeded
-// qwen3.6:27b on the README's declared 32GB+ target hardware. The model
-// supports up to 256k native, but doubling the KV cache for the extra
-// 128k would push memory past 32GB; users with bigger machines can lift
-// this per-profile in config.yaml.
+// defaultContextSize is the floor Bootstrap coerces bogus context_size to,
+// matching the local profile so a config missing the field behaves like a
+// fresh one. 128k tokens fits the seeded qwen3.6:27b in 32GB; the model
+// allows 256k native but the extra KV cache would blow the budget. Users
+// with bigger machines lift this per-profile.
 const defaultContextSize = 131072
 
-// cloudProfileNames is the set of managed profiles whose context_size is
-// authoritatively set by the server via the X-Context-Window response
-// header (see internal/cloud). For these profiles we deliberately leave
-// the on-disk context_size empty: Bootstrap does not seed it, the Coerce
-// loop does not fall back to defaultContextSize, and the TUI reads the
-// live value from each chat response. Local Ollama is not in this set —
-// it has no header channel, so config.yaml stays canonical there.
+// cloudProfileNames are profiles whose context_size the server sets via the
+// X-Context-Window header. We leave their on-disk context_size empty:
+// Bootstrap won't seed it, coercion won't default it, and the TUI reads the
+// live value per response. Local Ollama has no header channel, so config.yaml
+// stays canonical there.
 var cloudProfileNames = map[string]struct{}{
 	"hamrpass": {},
 }
 
-// IsCloudProfile reports whether a profile is one whose context_size is
-// server-managed.
+// IsCloudProfile reports whether a profile's context_size is server-managed.
 func IsCloudProfile(name string) bool {
 	_, ok := cloudProfileNames[name]
 	return ok
 }
 
-// managedProfiles are the two profiles codehamr seeds on first run: a
-// local Ollama target and the hosted hamrpass endpoint (with empty key —
-// the user pastes their hamrpass key via /hamrpass, which lazily
-// re-creates the entry from this seed if the user has deleted it). After
-// first run config.yaml belongs to the user — deletions and renames
-// stick, Bootstrap never re-adds anything. hamrpass intentionally has
-// ContextSize=0 — combined with omitempty on the yaml tag, that keeps
-// the field out of config.yaml so users don't try to tune what the
-// server already manages.
+// managedProfiles are seeded on first run: a local Ollama target and the
+// hosted hamrpass endpoint (empty key — /hamrpass pastes it, re-creating the
+// entry from this seed if the user deleted it). After first run config.yaml is
+// the user's — deletions and renames stick, Bootstrap never re-adds anything.
+// hamrpass keeps ContextSize=0 so omitempty drops it from disk: users can't
+// tune what the server already manages.
 var managedProfiles = map[string]Profile{
 	"local": {
 		LLM:         "qwen3.6:27b",
@@ -73,11 +63,9 @@ var managedProfiles = map[string]Profile{
 	},
 }
 
-// Profile is one named model endpoint in config.yaml. Users can have any
-// number; `/models` switches between them. ContextSize is omitempty so
-// cloud profiles (server-managed window via X-Context-Window) leave the
-// field absent on disk; user-managed Ollama-style profiles set it to a
-// concrete value and it round-trips normally.
+// Profile is one named model endpoint in config.yaml; `/models` switches
+// between them. ContextSize is omitempty so server-managed cloud profiles omit
+// it on disk while user-managed profiles round-trip a concrete value.
 type Profile struct {
 	LLM         string `yaml:"llm"`
 	URL         string `yaml:"url"`
@@ -85,22 +73,21 @@ type Profile struct {
 	ContextSize int    `yaml:"context_size,omitempty"`
 }
 
-// Config is the on-disk schema at .codehamr/config.yaml. Unknown top-level
-// keys cause Bootstrap to fail (strict YAML decoding) so typos and stale
-// schemas surface immediately rather than being silently ignored.
+// Config is the on-disk schema at .codehamr/config.yaml. Strict decoding:
+// unknown top-level keys fail Bootstrap so typos and stale schemas surface
+// immediately rather than being silently ignored.
 type Config struct {
 	Active string              `yaml:"active"`
 	Models map[string]*Profile `yaml:"models"`
-	// Logging, when true, writes a fresh .codehamr/log.txt on every start
-	// and appends every chat exchange to it. Debug instrumentation —
-	// removable by deleting this field, internal/tui/debuglog.go, and the
-	// few dbgWrite call sites.
+	// Logging writes a fresh log.txt each start and appends every exchange.
+	// Debug instrumentation; removable with this field, debuglog.go, and the
+	// dbgWrite call sites.
 	Logging bool `yaml:"logging,omitempty"`
 	// runtime-only (not serialized)
 	Dir string `yaml:"-"`
-	// URLOverride, if set, takes precedence over ActiveProfile().URL
-	// everywhere the client dials out. Kept separate from the Profile map
-	// so a runtime override (CODEHAMR_URL) never round-trips into Save().
+	// URLOverride, if set, wins over ActiveProfile().URL everywhere we dial
+	// out. Kept off the Profile map so the runtime CODEHAMR_URL override never
+	// round-trips into Save().
 	URLOverride string `yaml:"-"`
 }
 
@@ -117,15 +104,13 @@ func Default() *Config {
 }
 
 // Bootstrap returns the config for the current project, creating .codehamr/
-// and config.yaml on first use. config.yaml is never overwritten. The system
-// prompt is not written to disk — it's embedded.
+// and config.yaml on first use. config.yaml is never overwritten; the prompt
+// is embedded, never written to disk.
 //
-// The directory check uses Lstat (not Stat) and refuses any pre-existing
-// .codehamr that isn't a regular directory: a symlink in its place would let
-// a co-tenant on a shared host redirect config.yaml to an attacker-controlled
-// path, planting a malicious models.<name>.url that quietly proxies the
-// user's hamrpass key on the next dial-out. Refusing rather than silently
-// honouring the symlink keeps config-injection off the table.
+// The directory check uses Lstat (not Stat) and refuses a pre-existing
+// .codehamr that isn't a real directory: a symlink there would let a co-tenant
+// redirect config.yaml to an attacker path, planting a models.<name>.url that
+// proxies the hamrpass key on the next dial-out.
 func Bootstrap(projectRoot string) (*Config, bool, error) {
 	dir := filepath.Join(projectRoot, DirName)
 	created := false
@@ -139,11 +124,9 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 			return nil, false, fmt.Errorf("%s: exists but is not a directory", dir)
 		}
 	case errors.Is(err, os.ErrNotExist):
-		// 0o700 because config.yaml inside this directory may carry the
-		// hamrpass key (a long-lived bearer token tied to the user's pass
-		// budget). World-listable parents would let other local users see
-		// that the directory exists and probe for the key file. The user
-		// owning the project is the only legitimate reader.
+		// 0o700: config.yaml may carry the hamrpass key (a long-lived bearer
+		// token). A world-listable dir lets other local users spot it and probe
+		// for the key. Only the project owner should read here.
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, false, err
 		}
@@ -153,10 +136,9 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	}
 
 	cfgPath := filepath.Join(dir, "config.yaml")
-	// Same symlink defence as the directory check: a config.yaml planted as a
-	// symlink would let an attacker redirect either the read (deciding what
-	// config we honour) or the write (clobbering an arbitrary user-writable
-	// file with the default seed). Refuse and surface a readable error.
+	// Same symlink defence as the directory check: a symlinked config.yaml
+	// could redirect the read (which config we honour) or the write (clobbering
+	// an arbitrary user-writable file with the seed). Refuse with a clear error.
 	if li, err := os.Lstat(cfgPath); err == nil && li.Mode()&os.ModeSymlink != 0 {
 		return nil, false, fmt.Errorf("%s: refuses to follow symlink — remove or replace with a real file", cfgPath)
 	}
@@ -178,22 +160,19 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	}
 	cfg.Dir = dir
 
-	// YAML `models: { name: ~ }` decodes to a nil *Profile entry, which would
-	// panic on the ContextSize deref below. Reject up front so the error is
-	// readable, not a stack trace.
+	// YAML `models: { name: ~ }` decodes to a nil *Profile that would panic on
+	// the ContextSize deref below. Reject up front for a readable error.
 	for name, p := range cfg.Models {
 		if p == nil {
 			return nil, false, fmt.Errorf("config.yaml: profile %q is empty — remove it or fill in the required fields", name)
 		}
 	}
-	// Coerce any missing / zero / negative context_size to the default.
-	// The packer subtracts fixed reservations and floors at 0, so a bogus
-	// value would degenerate packing to "keep only the newest message" —
-	// silently. Coerce up-front so nothing downstream has to defend.
-	// Cloud profiles are exempt: their context_size is server-authoritative
-	// and arrives via X-Context-Window on the first chat response. The TUI
-	// keeps a safe runtime fallback for the brief window before that
-	// response, so leaving the field empty here is correct.
+	// Coerce missing/zero/negative context_size to the default. The packer
+	// subtracts fixed reservations and floors at 0, so a bogus value would
+	// silently degenerate packing to "keep only the newest message". Coerce
+	// here so nothing downstream has to defend. Cloud profiles are exempt:
+	// their size arrives via X-Context-Window on the first response, and the
+	// TUI holds a runtime fallback until then.
 	for name, p := range cfg.Models {
 		if IsCloudProfile(name) {
 			continue
@@ -202,10 +181,9 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 			p.ContextSize = defaultContextSize
 		}
 	}
-	// Coerce Active if it points to a non-existent profile, picking the
-	// first profile in sorted order (deterministic across runs). If the
-	// user authored a config with no profiles at all, fail loud — runtime
-	// would otherwise nil-deref on the first dial-out.
+	// Coerce a dangling Active to the first profile in sorted order
+	// (deterministic). With no profiles at all, fail loud — runtime would
+	// otherwise nil-deref on the first dial-out.
 	if _, ok := cfg.Models[cfg.Active]; !ok {
 		names := cfg.ModelNames()
 		if len(names) == 0 {
@@ -217,10 +195,9 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	return cfg, created, nil
 }
 
-// EnsureHamrpass returns the hamrpass profile, creating it from the
-// canonical seed values if the user has deleted it from config.yaml.
-// Used by /hamrpass so a user who has hidden the profile can still
-// activate it by pasting a key — no "restart codehamr" detour.
+// EnsureHamrpass returns the hamrpass profile, re-creating it from the seed if
+// the user deleted it. Lets /hamrpass activate by pasting a key without a
+// restart detour.
 func (c *Config) EnsureHamrpass() *Profile {
 	if hp, ok := c.Models["hamrpass"]; ok {
 		return hp
@@ -246,44 +223,38 @@ func writeYAML(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	// Header is re-prepended on every Save (yaml.Marshal drops free-form
-	// comments), so it's the only place a hint reliably survives. The
-	// sandbox line is the most common first-run footgun: a user runs
-	// codehamr inside a devcontainer or WSL2 while Ollama runs on the
-	// host — `localhost` from inside the sandbox doesn't reach the host,
-	// so they see "connection refused" with no obvious cause. Native
-	// (non-sandboxed) users on any OS aren't affected, hence the
-	// sandbox-vs-host framing rather than an OS-specific one.
+	// Re-prepended every Save since yaml.Marshal drops free-form comments — the
+	// only place a hint survives. The sandbox line catches the top first-run
+	// footgun: in a devcontainer/WSL2 with Ollama on the host, `localhost`
+	// doesn't reach the host and yields a baffling "connection refused". Native
+	// users aren't affected, hence sandbox-vs-host framing over an OS-specific one.
 	header := []byte(`# codehamr configuration
 #
 # Running codehamr in a devcontainer / WSL2 with Ollama on the host:
 # swap 'http://localhost:11434' with 'http://host.docker.internal:11434' below.
 
 `)
-	// 0o600 because config.yaml carries the hamrpass key once /hamrpass
-	// activates a profile. World-readable was the prior default and made
-	// the bearer token visible to every local account on the machine.
-	// The user owning the project is the only legitimate reader.
+	// 0o600: config.yaml carries the hamrpass key once /hamrpass activates a
+	// profile, and only the project owner should read it.
 	if err := os.WriteFile(path, append(header, b...), 0o600); err != nil {
 		return err
 	}
-	// os.WriteFile only applies the 0o600 mode when it creates the file; for
-	// an existing config.yaml it preserves the old mode. A file left behind
-	// by the world-readable prior default (or a hand-edit) would otherwise
-	// keep 0o644 even as Save rewrites the freshly-pasted key into it, so
-	// Chmod unconditionally to close the upgrade-path leak.
+	// os.WriteFile applies the mode only on create; an existing file keeps its
+	// old mode. A leftover 0o644 (from the world-readable prior default or a
+	// hand-edit) would persist as Save rewrites the pasted key in, so Chmod
+	// unconditionally to close the upgrade-path leak.
 	return os.Chmod(path, 0o600)
 }
 
-// ActiveProfile returns the currently-selected profile. Bootstrap guarantees
-// that c.Active names a real profile, so this is a straight map lookup.
+// ActiveProfile returns the selected profile. Bootstrap guarantees c.Active
+// names a real one, so this is a straight map lookup.
 func (c *Config) ActiveProfile() *Profile {
 	return c.Models[c.Active]
 }
 
-// ActiveURL is the endpoint every dial-out should use: the runtime override
-// if set, otherwise the active profile's URL. Use this instead of reading
-// ActiveProfile().URL directly so CODEHAMR_URL doesn't leak back into Save.
+// ActiveURL is the endpoint every dial-out uses: the runtime override if set,
+// else the active profile's URL. Use this over ActiveProfile().URL so
+// CODEHAMR_URL doesn't leak back into Save.
 func (c *Config) ActiveURL() string {
 	if c.URLOverride != "" {
 		return c.URLOverride
@@ -291,18 +262,16 @@ func (c *Config) ActiveURL() string {
 	return c.ActiveProfile().URL
 }
 
-// ModelNames returns the profile names in sorted order. Sorted so the
-// popover cycles deterministically regardless of Go's map iteration order.
+// ModelNames returns the profile names sorted, so the popover cycles
+// deterministically regardless of map iteration order.
 func (c *Config) ModelNames() []string {
 	return slices.Sorted(maps.Keys(c.Models))
 }
 
-// SetActive switches the active profile and persists. Fails if name is
-// unknown — no silent "hope you meant this" coercion. On Save failure the
-// in-memory Active is reverted so the live model and config.yaml stay in
-// lockstep — otherwise the user's "switch" sticks for the rest of the
-// session but Bootstrap reads the unchanged file on the next start, silently
-// undoing what the user did.
+// SetActive switches the active profile and persists. Fails on an unknown name
+// — no silent coercion. On Save failure it reverts in-memory Active so the live
+// model and config.yaml stay in lockstep; otherwise the switch would stick this
+// session but vanish on the next Bootstrap.
 func (c *Config) SetActive(name string) error {
 	if _, ok := c.Models[name]; !ok {
 		return fmt.Errorf("unknown model: %s", name)
