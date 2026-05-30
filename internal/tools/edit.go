@@ -29,6 +29,14 @@ func EditFile(path, oldString, newString string) string {
 	content := string(raw)
 	n := strings.Count(content, oldString)
 	if n == 0 {
+		// A near-miss that differs only in whitespace (wrong indentation, tabs vs
+		// spaces) is the most common edit_file failure for an LLM — name it so the
+		// model fixes the bytes instead of burning retries toward the failure nudge.
+		// Detection only; never auto-apply a fuzzy match, or the exact-match-once
+		// safety the caller relies on is gone.
+		if differsOnlyInWhitespace(content, oldString) {
+			return fmt.Sprintf("(not found: no exact match in %s — a block there differs only in whitespace (indentation/tabs/newlines); copy the exact bytes, including indentation)", path)
+		}
 		return fmt.Sprintf("(not found: old_string does not appear in %s)", path)
 	}
 	if n > 1 {
@@ -39,6 +47,15 @@ func EditFile(path, oldString, newString string) string {
 		return fmt.Sprintf("(write error: %v)", err)
 	}
 	return fmt.Sprintf("edited %s: -%d +%d bytes", path, len(oldString), len(newString))
+}
+
+// differsOnlyInWhitespace reports whether oldString matches content at exactly
+// one spot once every whitespace run is collapsed — i.e. the sole mismatch is
+// indentation/tabs/newlines. Bounded with spaces so a match can't straddle a
+// token boundary and mislabel an unrelated near-miss.
+func differsOnlyInWhitespace(content, oldString string) bool {
+	norm := func(s string) string { return " " + strings.Join(strings.Fields(s), " ") + " " }
+	return strings.Count(norm(content), norm(oldString)) == 1
 }
 
 // EditFileSchema is the OpenAI tool definition for edit_file. The description

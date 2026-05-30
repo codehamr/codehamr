@@ -49,7 +49,7 @@ const (
 	ToolOutputCap = 6000
 	ToolHeadTail  = 2000
 	// FixedSystem reserves budget for the embedded prompt + working-dir anchor
-	// (see tui.buildSystem). PROMPT_SYS.md is ~2720 tokens; the buffer to 3000
+	// (see tui.buildSystem). PROMPT_SYS.md is ~2845 tokens; the buffer to 3000
 	// keeps prompt edits from silently over-budgeting small-ctx profiles. A tui
 	// test pins this against the live prompt — bump here when it fails, never
 	// relax the assertion.
@@ -79,7 +79,7 @@ func Truncate(out string) string {
 	limit := ToolHeadTail * 4
 	head := runeBoundaryDown(out, limit)
 	tail := runeBoundaryUp(out, len(out)-limit)
-	marker := fmt.Sprintf("\n───── truncated: %d tokens total · showing first %d + last %d ─────\n",
+	marker := fmt.Sprintf("\n───── truncated: %d tokens total · showing first %d + last %d · re-run narrower (grep/sed/head/tail) ─────\n",
 		total, ToolHeadTail, ToolHeadTail)
 	return out[:head] + marker + out[tail:]
 }

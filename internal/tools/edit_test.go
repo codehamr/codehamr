@@ -59,6 +59,25 @@ func TestEditFileOldNotFound(t *testing.T) {
 	}
 }
 
+// TestEditFileWhitespaceNearMissHint: a miss whose only difference is
+// indentation gets the diagnostic hint, and the file is left untouched (the
+// hint is detection only — never a fuzzy apply).
+func TestEditFileWhitespaceNearMissHint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.go")
+	const orig = "func main() {\n\treturn 1\n}\n" // file indents with a tab
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := EditFile(path, "    return 1", "    return 2") // model supplied spaces
+	if !strings.Contains(s, "differs only in whitespace") {
+		t.Fatalf("want whitespace near-miss hint, got %q", s)
+	}
+	if got, _ := os.ReadFile(path); string(got) != orig {
+		t.Fatalf("file modified on near-miss: %q", got)
+	}
+}
+
 func TestEditFileOldNotUnique(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
