@@ -175,6 +175,17 @@ type Model struct {
 	toolRounds    int
 	runawayNudged bool
 
+	// Empty-reply nudge — the third soft backstop. The two above catch doing-too-
+	// much; this catches a turn ending with nothing said and nothing called. A
+	// clean finish always carries a summary and a continuing turn always carries a
+	// tool call, so an empty newest assistant message is always an anomaly: the
+	// model stopped mid-task, or (on a thinking model) its tool call streamed into
+	// the reasoning channel and was dropped before reaching us — the dominant
+	// silent-death we'd otherwise end on with no warning. One re-prompt to re-issue
+	// or finish; emptyNudged latches it to once per turn so a server that
+	// deterministically swallows the call can't loop. Reset in endTurn.
+	emptyNudged bool
+
 	// liveContextSize is the per-profile, runtime-only context window the
 	// server reports via X-Context-Window. Seeded by Probe at activation and
 	// refreshed on every chat EventDone, so a server-side change applies on the
@@ -579,6 +590,7 @@ func (m *Model) endTurn() {
 	m.pending = nil
 	m.toolRounds = 0
 	m.runawayNudged = false
+	m.emptyNudged = false
 }
 
 func (m *Model) buildMessages() []chmctx.Message {
@@ -771,16 +783,51 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 	if len(m.pending) > 0 {
 		return m.dispatchNextTool()
 	}
-	// The turn is ending with no tool calls. If the model meant to call a tool
-	// but its server's parser leaked the raw call into the text instead, warn
-	// the user — the fix is server-side, so re-prompting can't help.
-	if w := toolCallLeakWarning(m.history); w != "" {
+	// The turn is ending with no tool calls. If the model said nothing and called
+	// nothing, it either stopped mid-task or its tool call was swallowed (a
+	// thinking model streams the call into the reasoning channel, which never
+	// reaches us as content or a structured call). Re-prompt once to re-issue or
+	// finish; the emptyNudged latch bounds it to a single retry so a server that
+	// deterministically swallows the call can't loop. If it persists, surface it
+	// rather than dying silently — the prior behaviour left a half-done artifact
+	// with no banner at all.
+	if newestAssistantEmpty(m.history) {
+		if !m.emptyNudged {
+			m.emptyNudged = true
+			dbgWritef("nudge", "empty-reply nudge injected (turn ended with no content and no tool call)")
+			m.history = append(m.history, chmctx.Message{
+				Role:    chmctx.RoleSystem,
+				Content: "Your last turn ended with no reply and no tool call. If you meant to call a tool and it did not run, issue it again now as a proper tool call. If you are still working, continue. If the task is done, check it against the original request — actually run or drive what proves it works — then reply with a one-line summary.",
+			})
+			m.phase = phaseThinking
+			return m, m.startChat()
+		}
+		m.appendLine(styleError.Render("⚠ the model ended its turn with no reply and no tool call — it stopped mid-task, or your model server dropped the call (a thinking model's reasoning parser can swallow it: add vLLM `--reasoning-parser qwen3`, or turn thinking off for tool turns)."))
+		dbgWritef("leak", "turn ended with an empty assistant message after a re-prompt (model stalled or the call was swallowed server-side)")
+	} else if w := toolCallLeakWarning(m.history); w != "" {
+		// The model meant to call a tool but its server's parser leaked the raw
+		// call into the reply text instead. The fix is server-side.
 		m.appendLine(w)
 		dbgWritef("leak", "turn ended with tool-call text leaked into the reply (server-side parser misconfigured)")
 	}
 	m.finalizeTurn()
 	m.endTurn()
 	return m, nil
+}
+
+// newestAssistantEmpty reports whether the turn's final assistant message
+// carried neither text nor a structured tool call. A clean finish always has a
+// summary and a continuing turn always has a tool call, so an empty newest
+// assistant message is always an anomaly — the model stopped mid-task, or its
+// call streamed into the reasoning channel and was dropped before reaching us.
+func newestAssistantEmpty(history []chmctx.Message) bool {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != chmctx.RoleAssistant {
+			continue
+		}
+		return strings.TrimSpace(history[i].Content) == "" && len(history[i].ToolCalls) == 0
+	}
+	return false
 }
 
 // toolCallLeakWarning returns a user-facing diagnostic when the newest assistant
@@ -805,7 +852,7 @@ func toolCallLeakWarning(history []chmctx.Message) string {
 			return "" // it called a tool properly — the prose tag is incidental
 		}
 		if strings.Contains(history[i].Content, "<tool_call>") {
-			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running — your model server's tool-call parser is misconfigured. Fix it server-side: vLLM `--enable-auto-tool-choice --tool-call-parser qwen3_xml` (or `qwen3_coder`); llama.cpp `--jinja` on a current build. If you enabled thinking, the reasoning parser can swallow the call instead — add vLLM `--reasoning-parser qwen3`, or turn thinking off for tool turns.")
+			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running — your model server's tool-call parser is misconfigured. Fix it server-side: vLLM `--enable-auto-tool-choice --tool-call-parser qwen3_xml` (prefer `qwen3_xml` over `qwen3_coder`, which can run away on long tool-call inputs); llama.cpp `--jinja` on a current build. If you enabled thinking, the reasoning parser can swallow the call instead — add vLLM `--reasoning-parser qwen3`, or turn thinking off for tool turns.")
 		}
 		return "" // newest assistant message is clean
 	}

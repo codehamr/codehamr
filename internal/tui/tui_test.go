@@ -2756,3 +2756,125 @@ func TestStaleProbeDoesNotPrintActivationBannerForNonActiveProfile(t *testing.T)
 		t.Fatalf("active-profile probe must print activation banner:\n%s", got)
 	}
 }
+
+// TestNewestAssistantEmpty pins the anomaly detector behind the empty-reply
+// nudge: only a newest assistant message with neither text nor a structured
+// tool call counts as empty. A summary or a tool call is a normal turn.
+func TestNewestAssistantEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		hist []chmctx.Message
+		want bool
+	}{
+		{"empty assistant", []chmctx.Message{
+			{Role: chmctx.RoleUser, Content: "go"},
+			{Role: chmctx.RoleAssistant, Content: ""},
+		}, true},
+		{"whitespace-only assistant", []chmctx.Message{
+			{Role: chmctx.RoleAssistant, Content: "  \n\t"},
+		}, true},
+		{"assistant with summary", []chmctx.Message{
+			{Role: chmctx.RoleAssistant, Content: "done"},
+		}, false},
+		{"assistant with tool call", []chmctx.Message{
+			{Role: chmctx.RoleAssistant, ToolCalls: []chmctx.ToolCall{{Name: "bash"}}},
+		}, false},
+		{"newest is tool result, prior assistant empty", []chmctx.Message{
+			{Role: chmctx.RoleAssistant, Content: ""},
+			{Role: chmctx.RoleTool, Content: "out"},
+		}, true},
+		{"no assistant at all", []chmctx.Message{
+			{Role: chmctx.RoleUser, Content: "go"},
+		}, false},
+	}
+	for _, tc := range cases {
+		if got := newestAssistantEmpty(tc.hist); got != tc.want {
+			t.Errorf("%s: newestAssistantEmpty = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestEmptyReplyNudgeRePromptsThenRecovers: a turn whose first round comes back
+// with no content and no tool call (the dominant silent-death: a thinking
+// model's tool call swallowed into the reasoning channel) must be re-prompted
+// once, not ended silently. Here the second round produces a real summary, so
+// the run self-heals.
+func TestEmptyReplyNudgeRePromptsThenRecovers(t *testing.T) {
+	var round int
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		round++
+		if round == 1 {
+			// Empty assistant message: stop with no content delta, no tool calls.
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"fixed and verified"}}]}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+
+	m := newTestModel(t, handler)
+	final := drainFinal(t, m, "build it")
+
+	if round != 2 {
+		t.Fatalf("empty reply must trigger exactly one re-prompt (want 2 requests, got %d)", round)
+	}
+	var sawNudge bool
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleSystem && strings.Contains(msg.Content, "no reply and no tool call") {
+			sawNudge = true
+		}
+	}
+	if !sawNudge {
+		t.Fatalf("expected an empty-reply system nudge in history; got %+v", final.history)
+	}
+	scroll := stripANSI(final.scroll.String())
+	if !strings.Contains(scroll, "fixed and verified") {
+		t.Fatalf("recovered summary missing from scroll:\n%s", scroll)
+	}
+	if strings.Contains(scroll, "your model server dropped the call") {
+		t.Fatalf("a recovered turn must not surface the persistent-empty diagnostic:\n%s", scroll)
+	}
+	if final.phase != phaseIdle {
+		t.Fatalf("turn must end idle after recovery, phase=%v", final.phase)
+	}
+}
+
+// TestEmptyReplyNudgeFiresOnceThenSurfaces: if the model stays empty even after
+// the re-prompt (e.g. a server that deterministically swallows the call), the
+// latch must stop at one retry — no infinite loop — and the failure must be
+// surfaced rather than dying silently as before.
+func TestEmptyReplyNudgeFiresOnceThenSurfaces(t *testing.T) {
+	var round int
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		round++
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+
+	m := newTestModel(t, handler)
+	final := drainFinal(t, m, "build it")
+
+	if round != 2 {
+		t.Fatalf("latch must bound re-prompts to one (want 2 requests total, got %d)", round)
+	}
+	scroll := stripANSI(final.scroll.String())
+	if !strings.Contains(scroll, "your model server dropped the call") {
+		t.Fatalf("a persistently-empty turn must surface a diagnostic, not die silently:\n%s", scroll)
+	}
+	if final.phase != phaseIdle {
+		t.Fatalf("turn must end idle, phase=%v", final.phase)
+	}
+}
+
+// drainFinal submits a prompt and pumps the whole turn to completion, returning
+// the settled model. Centralises the submit+drain dance the empty-reply tests share.
+func drainFinal(t *testing.T, m Model, prompt string) Model {
+	t.Helper()
+	mm, cmd := m.submit(prompt, prompt, promptEntry{display: prompt})
+	out, _ := drain(mm, cmd)
+	return out.(Model)
+}
