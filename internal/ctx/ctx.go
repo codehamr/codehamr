@@ -80,7 +80,7 @@ func Truncate(out string) string {
 	limit := ToolHeadTail * 4
 	head := runeBoundaryDown(out, limit)
 	tail := runeBoundaryUp(out, len(out)-limit)
-	marker := fmt.Sprintf("\n───── truncated: %d tokens total · showing first %d + last %d · re-run narrower (grep/sed/head/tail) ─────\n",
+	marker := fmt.Sprintf("\n───── truncated: %d tokens total — first %d + last %d shown, the middle is OMITTED. This is a PARTIAL view; you can't review or conclude from code you can't see here — re-run narrower (grep/sed/head/tail) to read the omitted span. ─────\n",
 		total, ToolHeadTail, ToolHeadTail)
 	return out[:head] + marker + out[tail:]
 }
