@@ -86,7 +86,7 @@ type streamOptions struct {
 
 // streamChunk is one OpenAI SSE frame. finish_reason is deliberately not
 // decoded: readSSE dispatches accumulated tool calls at stream end, not on
-// finish_reason=="tool_calls" — provider agnostic, since Ollama's /v1 shim
+// finish_reason=="tool_calls", staying provider agnostic since Ollama's /v1 shim
 // sometimes closes with "stop" even after streaming tool_calls.
 type streamChunk struct {
 	Choices []struct {
@@ -103,7 +103,7 @@ type streamDelta struct {
 	// Reasoning is the incremental chain-of-thought fragment that reasoning
 	// models stream in `delta.reasoning` before answer
 	// tokens. Forwarded as EventReasoning to keep the UI animating, but never
-	// round-trips into the assistant message — it has no place in history.
+	// round-trips into the assistant message: it has no place in history.
 	Reasoning string     `json:"reasoning,omitempty"`
 	ToolCalls []toolCall `json:"tool_calls,omitempty"`
 }
@@ -133,13 +133,13 @@ const (
 	EventToolCall
 	EventDone
 	EventError
-	// EventReasoning carries incremental reasoning text, kept out of history
-	// — exists only so the UI can tick its live token estimate while thinking.
+	// EventReasoning carries incremental reasoning text, kept out of history;
+	// it exists only so the UI can tick its live token estimate while thinking.
 	EventReasoning
 	// EventToolArgs carries an incremental tool-call arguments fragment (in
 	// Content), the bytes a write_file/edit_file/bash call streams as it's
-	// generated. Like EventReasoning it never touches history — the resolved
-	// call still arrives whole as EventToolCall at stream end — and exists only
+	// generated. Like EventReasoning it never touches history (the resolved
+	// call still arrives whole as EventToolCall at stream end) and exists only
 	// so the UI's live token estimate keeps ticking while the model writes a
 	// file, instead of freezing until EventDone.
 	EventToolArgs
@@ -147,12 +147,12 @@ const (
 
 // streamIdleTimeout bounds how long readSSE waits for the NEXT SSE frame before
 // treating the stream as dead. It is an inter-frame (idle) timeout, not an
-// end-to-end one: a slow-but-alive stream keeps arriving frames — content,
-// reasoning, even blank/keepalive lines — each resetting the watchdog, so only a
+// end-to-end one: a slow-but-alive stream keeps arriving frames (content,
+// reasoning, even blank/keepalive lines), each resetting the watchdog, so only a
 // connection gone silent after 200 OK trips it. The silent window that matters is
 // the pre-first-token gap: a local model emits nothing while it prefills the
 // prompt (or cold-reloads after a keep_alive eviction), and a 27B on modest
-// hardware can stay silent well past two minutes there — a 120s value killed such
+// hardware can stay silent well past two minutes there; a 120s value killed such
 // live streams mid-prefill. 600s clears that worst case; erring long is cheap
 // because a genuinely dead socket is still escapable instantly with Ctrl+C
 // (request-context cancel unblocks the read), whereas killing a live stream loses
@@ -208,7 +208,7 @@ type ProbeResult struct {
 // Probe sends a minimal hello chat just to harvest response headers in one
 // round trip: status validates the URL/model/key combo, X-Context-Window gives
 // the live size, X-Budget-Remaining the live fraction. The body is closed
-// unread — on the cloud proxy that may already charge one token, the cost of a
+// unread; on the cloud proxy that may already charge one token, the cost of a
 // single round-trip "key works AND here is your real window". Returns the
 // standard cloud errors (Unreachable, Unauthorized, BudgetExhausted) for
 // errors.Is branching.
@@ -254,7 +254,7 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	// Idle watchdog: bufio.Scanner.Scan() ignores context, so a server that
 	// stops sending after 200 OK would wedge readSSE forever. Closing the body
 	// from the timer unblocks the in-flight Read; readSSE then returns and we
-	// surface a stall. parent isn't cancelled, so — unlike Ctrl+C — the error
+	// surface a stall. parent isn't cancelled, so (unlike Ctrl+C) the error
 	// reaches the user. readSSE resets the timer on every frame.
 	idle := c.IdleTimeout
 	if idle <= 0 {
@@ -287,7 +287,7 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	})
 }
 
-// sendEvent puts e on out, bailing if parent cancels first — so a slow or
+// sendEvent puts e on out, bailing if parent cancels first, so a slow or
 // vanished consumer after Ctrl+C can't wedge the stream goroutine on a full
 // buffer.
 func sendEvent(parent context.Context, out chan<- Event, e Event) bool {
@@ -322,8 +322,8 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 // flavours, both caught by substring match: newer OpenAI models
 // ("reasoning_effort … not supported") and Ollama non-thinking models
 // ("<model> does not support thinking"). Each signal is the provider's own
-// phrase — "not support"+"reasoning_effort", or the literal "does not support
-// thinking" — so an unrelated 400 that merely contains the word "thinking"
+// phrase ("not support"+"reasoning_effort", or the literal "does not support
+// thinking") so an unrelated 400 that merely contains the word "thinking"
 // can't trip the fallback and latch reasoning off for the Client's whole life.
 // Probe never sets ReasoningEffort, so its 400 can't trip the flag.
 func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, error) {
@@ -373,7 +373,7 @@ func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Respons
 	switch resp.StatusCode {
 	case 401:
 		// Drain before the deferred Close so the keep-alive connection returns
-		// to the pool instead of being discarded — same as the 402/default arms.
+		// to the pool instead of being discarded, same as the 402/default arms.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, cloud.BudgetStatus{}, nil, cloud.ErrUnauthorized
 	case 402:
@@ -427,7 +427,7 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 	)
 
 	for scanner.Scan() {
-		// Any line — data, blank separator, or ": keepalive" comment — is
+		// Any line (data, blank separator, or ": keepalive" comment) is
 		// liveness; reset the idle watchdog before inspecting it.
 		onFrame()
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -456,7 +456,7 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 	}
 
 	// Emit accumulated tool calls once at stream end, independent of
-	// finish_reason — Ollama's /v1 shim sometimes closes with "stop" even
+	// finish_reason: Ollama's /v1 shim sometimes closes with "stop" even
 	// after streaming tool_calls, so dispatching here (not on
 	// finish_reason=="tool_calls") stays provider agnostic. Resolve every slot
 	// once, sharing the parsed payload between the events and the final message.
@@ -502,7 +502,7 @@ func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetSta
 			*order = append(*order, tc.Index)
 		}
 		// id/name usually arrive in the first fragment, but updating on any
-		// non-empty value tolerates a provider that ships them later —
+		// non-empty value tolerates a provider that ships them later;
 		// otherwise an empty tool_call_id round-trips into history and the
 		// next /v1 request 400s on the unpaired tool message.
 		if tc.ID != "" {
@@ -513,7 +513,7 @@ func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetSta
 		}
 		slot.args.WriteString(tc.Function.Arguments)
 		// Forward the fragment so the UI's live token estimate ticks while the
-		// model streams file content into a tool call — the resolved call still
+		// model streams file content into a tool call: the resolved call still
 		// arrives whole as EventToolCall at stream end, so this is UI-only.
 		if tc.Function.Arguments != "" {
 			if !sendEvent(parent, out, Event{Kind: EventToolArgs, Content: tc.Function.Arguments, Budget: budget}) {

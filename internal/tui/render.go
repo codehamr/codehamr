@@ -11,7 +11,7 @@ import (
 )
 
 // splashCode and splashHamr form the two-tone "CODEHAMR" wordmark printed
-// once at startup, pushed into scrollback via tea.Println — it scrolls up
+// once at startup, pushed into scrollback via tea.Println; it scrolls up
 // naturally as content arrives, so View() needs no hide-on-first-content branch.
 var splashCode = []string{
 	" ██████  ██████  ██████   ███████ ",
@@ -30,7 +30,7 @@ var splashHamr = []string{
 }
 
 // appendLine queues a styled line for tea.Println on the next Update cycle,
-// so the terminal — not us — owns the scrollback. scroll is a passive
+// so the terminal, not us, owns the scrollback. scroll is a passive
 // write-only transcript: never rendered, read only by tests and the debug log.
 func (m *Model) appendLine(s string) {
 	m.scroll.WriteString(s + "\n")
@@ -117,7 +117,7 @@ func (m *Model) visualPromptLines() int {
 //
 // Caveat: width is summed per-rune (runewidth) rather than per grapheme cluster
 // like bubbles' uniseg, so ASCII and CJK match exactly, but a multi-rune cluster
-// (a ZWJ-family emoji, a keycap) can over-count — harmlessly over-growing the
+// (a ZWJ-family emoji, a keycap) can over-count, harmlessly over-growing the
 // prompt by a row on emoji-heavy input. Not worth pulling in uniseg for that.
 func wrapRows(s string, width int) int {
 	if width <= 0 {
@@ -148,7 +148,7 @@ func wrapRows(s string, width int) int {
 			wordW, spaces = 0, 0
 			hadWord = false
 		case hadWord && wordW+charW > width:
-			// Space-less word grew past the width — matches bubbles'
+			// Space-less word grew past the width; matches bubbles'
 			// StringWidth(word)+lastCharLen check.
 			if lineW > 0 {
 				row++
@@ -172,7 +172,7 @@ func wrapRows(s string, width int) int {
 func (m Model) View() string {
 	if m.width == 0 || m.suppressView {
 		// No WindowSizeMsg yet, or a width-resize mid-drag: an empty frame
-		// is safest — a 0-wide layout flashes garbled, and a real frame
+		// is safest. A 0-wide layout flashes garbled, and a real frame
 		// mid-drag races the renderer's stale-flush window.
 		return ""
 	}
@@ -186,8 +186,8 @@ func (m Model) View() string {
 	// Divider one cell narrower than m.width, and pieces joined with bare
 	// "\n" (not lipgloss.JoinVertical's Left-pad): a line ending in the last
 	// column trips Apple Terminal.app's last-column-wrap (DECAWM xn)
-	// inconsistently, drifting bubbletea's inline line count by one per frame
-	// — a duplicated prompt line overwrites the status bar on macOS (other
+	// inconsistently, drifting bubbletea's inline line count by one per frame:
+	// a duplicated prompt line overwrites the status bar on macOS (other
 	// terminals stay clean). Keeping the last column blank sidesteps it.
 	pieces = append(pieces,
 		styleDim.Render(strings.Repeat("─", max(m.width-1, 1))),
@@ -223,7 +223,7 @@ func (m Model) splashLines() []string {
 		styleDim.Render(fmt.Sprintf("  %s · %s @ %s",
 			m.Version, m.cfg.ActiveProfile().LLM, m.cfg.Active)),
 		"",
-		styleDim.Render("  Sandboxed AI shell — run in a devcontainer or VM."),
+		styleDim.Render("  Sandboxed AI shell - run in a devcontainer or VM."),
 		"",
 	}
 }
@@ -256,7 +256,7 @@ func (m Model) renderStatusBar() string {
 	return strings.Join(segs, sep)
 }
 
-// appendStatus wraps one segment in styleStatus and appends it — keeps
+// appendStatus wraps one segment in styleStatus and appends it, keeping
 // renderStatusBar readable instead of repeating the wrap at each call site.
 func appendStatus(segs []string, s string) []string {
 	return append(segs, styleStatus.Render(s))

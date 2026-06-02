@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// hamrColor is the single accent — "hot iron under the hammer". One colour for
+// hamrColor is the single accent, "hot iron under the hammer". One colour for
 // every deliberate highlight; everything else is default, dim, or warn/error.
 var hamrColor = lipgloss.Color("208")
 
@@ -20,14 +20,14 @@ var (
 	styleWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styleError = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 
-	// Confirmations use the accent — "something good happened", never loud.
+	// Confirmations use the accent, "something good happened", never loud.
 	styleOK = lipgloss.NewStyle().Foreground(hamrColor)
 
 	// Prompt marker and spinner share the accent: both mark live activity.
 	stylePrompt  = lipgloss.NewStyle().Foreground(hamrColor)
 	styleSpinner = lipgloss.NewStyle().Foreground(hamrColor)
 
-	// User's echoed line: bold default — distinct from assistant markdown
+	// User's echoed line: bold default, distinct from assistant markdown
 	// without painting the user's text orange.
 	styleUser = lipgloss.NewStyle().Bold(true)
 

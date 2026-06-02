@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// newChippablePrompt returns a realistically-sized promptInput. Width matters —
+// newChippablePrompt returns a realistically-sized promptInput. Width matters:
 // cursor navigation walks the wrapped grid; height is irrelevant here.
 func newChippablePrompt() promptInput {
 	p := newPromptInput()
@@ -32,7 +32,7 @@ func makePaste(n int) string {
 	return strings.Join(parts, "\n")
 }
 
-// TestSmallPasteStaysInline: a paste below threshold stays raw — no chip.
+// TestSmallPasteStaysInline: a paste below threshold stays raw, no chip.
 func TestSmallPasteStaysInline(t *testing.T) {
 	p := newChippablePrompt()
 	small := makePaste(3)
@@ -49,7 +49,7 @@ func TestSmallPasteStaysInline(t *testing.T) {
 	}
 }
 
-// TestLargePasteBecomesChip: a ≥pasteChipMinLines paste collapses to one chip —
+// TestLargePasteBecomesChip: a ≥pasteChipMinLines paste collapses to one chip.
 // DisplayValue shows the label, Value expands back to the original.
 func TestLargePasteBecomesChip(t *testing.T) {
 	p := newChippablePrompt()
@@ -109,7 +109,7 @@ func TestDeleteAtChipStartRemovesWholeChip(t *testing.T) {
 }
 
 // TestLeftArrowAtChipEndJumpsToStart: ← jumps the cursor across the whole chip
-// in one keystroke — it never lands on interior positions.
+// in one keystroke; it never lands on interior positions.
 func TestLeftArrowAtChipEndJumpsToStart(t *testing.T) {
 	p := newChippablePrompt()
 	p, _ = p.Update(pasteKey(makePaste(9)))
@@ -221,7 +221,7 @@ func TestTypingShiftsSpans(t *testing.T) {
 	}
 }
 
-// TestEntryRestoreRoundTrip: Entry()+Restore() fully recovers chip state —
+// TestEntryRestoreRoundTrip: Entry()+Restore() fully recovers chip state:
 // display text, spans, expanded Value(). Backs ↑/↓ history replay.
 func TestEntryRestoreRoundTrip(t *testing.T) {
 	p := newChippablePrompt()
@@ -264,7 +264,7 @@ func TestResetClearsChips(t *testing.T) {
 	}
 }
 
-// TestSetValueClearsChips: SetValue installs plain text and drops prior chips —
+// TestSetValueClearsChips: SetValue installs plain text and drops prior chips,
 // used by slash-popover Tab-completion, where chips can't be part of a replacement.
 func TestSetValueClearsChips(t *testing.T) {
 	p := newChippablePrompt()
@@ -297,12 +297,12 @@ func TestBackspaceNotAtChipBoundaryFallsThrough(t *testing.T) {
 	}
 }
 
-// TestPageKeysMoveCursorByHeight: PgUp/PgDn move the cursor by one prompt-height
-// — bubbles/textarea ships an empty viewport keymap, so without our handling
+// TestPageKeysMoveCursorByHeight: PgUp/PgDn move the cursor by one prompt-height.
+// bubbles/textarea ships an empty viewport keymap, so without our handling
 // these keys are no-ops (mouse wheel already scrolls via the MouseMsg path).
 func TestPageKeysMoveCursorByHeight(t *testing.T) {
 	p := newChippablePrompt()
-	// Fill with many rows. SetValue installs all at once — avoids the chip
+	// Fill with many rows. SetValue installs all at once, avoiding the chip
 	// threshold and per-line typing.
 	var b strings.Builder
 	for i := 0; i < 40; i++ {
@@ -367,7 +367,7 @@ func TestCRLFLineEndings(t *testing.T) {
 
 // TestPasteWithoutFlagButWithNewlineStillChips: some terminals omit the
 // bracketed-paste flag, yet multi-line content in one KeyMsg can't come from
-// typing (the rune collector breaks on \n) — so we treat it as a paste anyway.
+// typing (the rune collector breaks on \n), so we treat it as a paste anyway.
 func TestPasteWithoutFlagButWithNewlineStillChips(t *testing.T) {
 	p := newChippablePrompt()
 	msg := tea.KeyMsg{
@@ -382,7 +382,7 @@ func TestPasteWithoutFlagButWithNewlineStillChips(t *testing.T) {
 }
 
 // TestLongSingleLinePasteChipsByCharCount: a long single-line blob (zero
-// newlines) still collapses — char threshold catches minified JSON and
+// newlines) still collapses: char threshold catches minified JSON and
 // one-line stack traces that line-count alone would miss.
 func TestLongSingleLinePasteChipsByCharCount(t *testing.T) {
 	p := newChippablePrompt()
@@ -397,7 +397,7 @@ func TestLongSingleLinePasteChipsByCharCount(t *testing.T) {
 	}
 }
 
-// TestBackspaceImmediatelyAfterChipRemovesIt: atomic-delete regression guard —
+// TestBackspaceImmediatelyAfterChipRemovesIt: atomic-delete regression guard,
 // after a paste the cursor sits at chip.end, so one Backspace deletes the chip
 // without any manual cursor setup.
 func TestBackspaceImmediatelyAfterChipRemovesIt(t *testing.T) {

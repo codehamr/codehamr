@@ -85,7 +85,7 @@ func newPromptInput() promptInput {
 }
 
 // chipLabel is the visible form inserted into the textarea. Plain text, no
-// ANSI — textarea doesn't render inline styling inside its value.
+// ANSI, since textarea doesn't render inline styling inside its value.
 func chipLabel(lines int) string {
 	return fmt.Sprintf("[Pasted text +%d lines]", lines)
 }
@@ -110,8 +110,8 @@ func (p promptInput) Update(msg tea.Msg) (promptInput, tea.Cmd) {
 		// A key the chip-aware handlers didn't claim (a typed rune, or a cursor
 		// move like Ctrl+B/Ctrl+F that the textarea owns) is about to reach the
 		// textarea. Snap out of any chip first so the keystroke can't land inside
-		// a label and split it: a split label desyncs reconcile, which — when two
-		// chips share a label — cross-maps the survivor to the wrong paste.
+		// a label and split it: a split label desyncs reconcile, which, when two
+		// chips share a label, cross-maps the survivor to the wrong paste.
 		p.snapCursorOutOfChip()
 	}
 	var cmd tea.Cmd
@@ -121,7 +121,7 @@ func (p promptInput) Update(msg tea.Msg) (promptInput, tea.Cmd) {
 }
 
 // handlePageKey implements PgUp/PgDn. textarea disables its viewport keymap, so
-// page keys aren't wired — we translate them to N×CursorUp/CursorDown (one
+// page keys aren't wired, so we translate them to N×CursorUp/CursorDown (one
 // visible page, letting the viewport scroll to match), then snap out of any
 // chip the move landed inside so the cursor never renders mid-label.
 func (p promptInput) handlePageKey(msg tea.KeyMsg) (bool, promptInput) {
@@ -161,7 +161,7 @@ func (p *promptInput) snapCursorOutOfChip() int {
 }
 
 // chipAtBoundary returns the chip whose start (atStart=true) or end
-// (atStart=false) coincides with cur — the check Backspace/Delete/Left/Right share.
+// (atStart=false) coincides with cur, the check Backspace/Delete/Left/Right share.
 func (p promptInput) chipAtBoundary(cur int, atStart bool) (chipSpan, bool) {
 	for _, chip := range p.spans {
 		boundary := chip.end
@@ -178,7 +178,7 @@ func (p promptInput) chipAtBoundary(cur int, atStart bool) (chipSpan, bool) {
 // looksLikePaste recognises paste-like key events. Primary signal: the
 // bracketed-paste Paste flag (terminal wraps content in \x1b[200~...\x1b[201~).
 // Some terminals omit those markers, so a KeyRunes event containing a newline
-// also counts — bubbletea breaks runs on control chars, so a single keystroke
+// also counts: bubbletea breaks runs on control chars, so a single keystroke
 // can never produce a newline inside one KeyMsg.
 func looksLikePaste(msg tea.KeyMsg) bool {
 	if msg.Paste {
@@ -196,7 +196,7 @@ func looksLikePaste(msg tea.KeyMsg) bool {
 }
 
 // shouldChip collapses a paste when either its line count or char count clears
-// the threshold — lines catch multi-line pastes, chars catch single-line blobs.
+// the threshold: lines catch multi-line pastes, chars catch single-line blobs.
 func shouldChip(s string) bool {
 	if countLines(s) >= pasteChipMinLines {
 		return true
@@ -250,7 +250,7 @@ func (p promptInput) handleChipKey(msg tea.KeyMsg) (bool, promptInput) {
 
 // insertChip splices a chip label in at the cursor, keeping spans sorted by
 // start: find the insertion index, shift later spans by the label length, then
-// splice. The trailing reconcile() is belt-and-braces — usually a no-op.
+// splice. The trailing reconcile() is belt-and-braces, usually a no-op.
 func (p *promptInput) insertChip(content string) {
 	lines := countLines(content)
 	id := p.nextID
@@ -261,7 +261,7 @@ func (p *promptInput) insertChip(content string) {
 	labelLen := utf8.RuneCountInString(label)
 	// Snap out of any chip the cursor is parked inside before choosing the
 	// insertion point, so a paste can't splice a new label into the interior of
-	// an existing one — reconcile would then fail to re-find the broken label
+	// an existing one: reconcile would then fail to re-find the broken label
 	// and silently drop a chip, sending the wrong (or no) paste to the LLM.
 	insertAt := p.snapCursorOutOfChip()
 
@@ -302,8 +302,8 @@ func (p *promptInput) deleteSpan(chip chipSpan) {
 }
 
 // reconcile re-finds each chip's label in the value (searching past the prior
-// span's end) and updates offsets. A span whose label has vanished — e.g.
-// partially deleted by a non-chip-aware edit — is dropped along with its store
+// span's end) and updates offsets. A span whose label has vanished (e.g.
+// partially deleted by a non-chip-aware edit) is dropped along with its store
 // entry, so the chip becomes plain text from then on.
 func (p *promptInput) reconcile() {
 	value := p.ta.Value()
@@ -423,12 +423,12 @@ func runeOffsetToRowCol(value string, offset int) (int, int) {
 	return row, col
 }
 
-// View delegates to the textarea — chip labels are already plain text in the
+// View delegates to the textarea. Chip labels are already plain text in the
 // value, so no post-processing is needed.
 func (p promptInput) View() string { return p.ta.View() }
 
 // Value returns the prompt text with every chip label expanded to its original
-// content — what goes to the LLM on submit.
+// content, what goes to the LLM on submit.
 func (p promptInput) Value() string {
 	if len(p.spans) == 0 {
 		return p.ta.Value()
@@ -455,7 +455,7 @@ func (p promptInput) Value() string {
 	return b.String()
 }
 
-// DisplayValue returns the text as shown — chip labels stay collapsed. Used for
+// DisplayValue returns the text as shown, chip labels stay collapsed. Used for
 // echo-to-scroll on submit and the ↑/↓ history snapshot.
 func (p promptInput) DisplayValue() string { return p.ta.Value() }
 

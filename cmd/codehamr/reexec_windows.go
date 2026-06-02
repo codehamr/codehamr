@@ -10,7 +10,7 @@ import (
 
 // reExec runs the freshly-installed binary. Windows has no execve, so
 // instead of the Unix same-PID swap we spawn it as a child sharing our
-// stdio, wait, and forward its exit code — one continuous session despite
+// stdio, wait, and forward its exit code: one continuous session despite
 // two brief PIDs.
 //
 // signal.Ignore(os.Interrupt) is load-bearing: otherwise the parent's

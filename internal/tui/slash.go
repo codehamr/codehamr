@@ -14,7 +14,7 @@ import (
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
-// argOption is one popover entry — used at command-level (one row per command)
+// argOption is one popover entry, used at command-level (one row per command)
 // and argument-level (one row per accepted value for the active command).
 type argOption struct {
 	value       string // what gets inserted / committed
@@ -90,7 +90,7 @@ func (m Model) runSlash(text string) (tea.Model, tea.Cmd) {
 	if c := commandByName(fields[0]); c != nil {
 		return c.handler(m, fields[1:])
 	}
-	m.appendLine(styleWarn.Render("unknown command — type / to see options"))
+	m.appendLine(styleWarn.Render("unknown command - type / to see options"))
 	return m, nil
 }
 
@@ -103,7 +103,7 @@ func (m Model) runSlash(text string) (tea.Model, tea.Cmd) {
 // file doesn't spam a warning on every keystroke).
 //
 // Rebuilds the llm.Client when the active profile's resolved (URL, model, key)
-// triple changed — covers both within-profile edits and a moved active.
+// triple changed: covers both within-profile edits and a moved active.
 func (m *Model) reloadConfigFromDisk() error {
 	projectRoot := filepath.Dir(m.cfg.Dir)
 	fresh, _, err := config.Bootstrap(projectRoot)
@@ -137,7 +137,7 @@ func PrintHelp(out io.Writer) {
 // --- handlers ---------------------------------------------------------------
 
 // cmdModel: `/models` lists, `/models <name>` sets. Cycling is Tab/Shift+Tab
-// in the popover — no separate "next" command.
+// in the popover, no separate "next" command.
 func (m Model) cmdModel(args []string) (tea.Model, tea.Cmd) {
 	if len(args) == 0 {
 		m.printModelList()
@@ -182,7 +182,7 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 
 // rebuildClient swaps in a fresh llm.Client for the now-active profile.
 // Replacing the pointer (not mutating fields) drops the prior Client's sticky
-// state (noReasoningEffort, keep-alive pool tied to the old URL) — new
+// state (noReasoningEffort, keep-alive pool tied to the old URL): new
 // endpoint, fresh slate.
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()
@@ -202,7 +202,7 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.streamingEstimate = 0
 	// Reset the repeated-failure streak so the next turn starts clean.
 	m.failKey, m.failStreak = "", 0
-	// Wipe prompt recall too — in-memory ring and on-disk .codehamr/history —
+	// Wipe prompt recall too: in-memory ring and on-disk .codehamr/history,
 	// or leftover history would contradict the "fresh start" promise.
 	m.promptHistory = nil
 	m.histIdx = -1
@@ -231,7 +231,7 @@ const hamrpassMinKeyLen = 16
 //
 // Non-printable/non-ASCII runes are rejected up front: http.Header.Set accepts
 // the bytes but http.Client.Do then errors with `invalid header field value
-// for "Authorization"` on the wire — after the key has already been persisted
+// for "Authorization"` on the wire, after the key has already been persisted
 // to config.yaml. Real keys are ASCII-printable; reject anything else early.
 func hamrpassValidate(raw string) (key, hint string, ok bool) {
 	key = strings.TrimSpace(raw)
@@ -254,7 +254,7 @@ func hamrpassValidate(raw string) (key, hint string, ok bool) {
 
 // hamrpassArgHint is the args callback for /hamrpass: one synthetic row whose
 // value mirrors the typed argument and whose description carries the live
-// validation hint. Mirroring keeps the row alive — refreshSuggest filters via
+// validation hint. Mirroring keeps the row alive: refreshSuggest filters via
 // HasPrefix(value, prefix), and HasPrefix(x, x) is always true.
 func hamrpassArgHint(m Model) []argOption {
 	_, rest, _ := strings.Cut(m.ta.Value(), " ")

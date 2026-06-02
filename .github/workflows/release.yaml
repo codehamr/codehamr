@@ -48,7 +48,7 @@ jobs:
         run: |
           for f in dist/codehamr-linux-amd64 dist/codehamr-linux-arm64; do
             if readelf -d "$f" | grep -q NEEDED; then
-              echo "::error::$f is dynamically linked (CGO leaked on?) — it will fail to exec on musl/old-glibc after auto-update"
+              echo "::error::$f is dynamically linked (CGO leaked on?); it will fail to exec on musl/old-glibc after auto-update"
               exit 1
             fi
           done

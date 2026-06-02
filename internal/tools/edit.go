@@ -8,9 +8,9 @@ import (
 
 // EditFile replaces old_string with new_string in path. old_string must match
 // EXACTLY ONCE; otherwise the file is untouched and an error string is returned
-// so the model sees the failure and reacts — same convention as bash/WriteFile.
+// so the model sees the failure and reacts, same convention as bash/WriteFile.
 //
-// Empty old_string is rejected (no anchor — every position matches);
+// Empty old_string is rejected (no anchor, every position matches);
 // old_string == new_string is rejected as a no-op turn-waster.
 func EditFile(path, oldString, newString string) string {
 	if path == "" {
@@ -30,17 +30,17 @@ func EditFile(path, oldString, newString string) string {
 	n := strings.Count(content, oldString)
 	if n == 0 {
 		// A near-miss that differs only in whitespace (wrong indentation, tabs vs
-		// spaces) is the most common edit_file failure for an LLM — name it so the
+		// spaces) is the most common edit_file failure for an LLM. Name it so the
 		// model fixes the bytes instead of burning retries toward the failure nudge.
 		// Detection only; never auto-apply a fuzzy match, or the exact-match-once
 		// safety the caller relies on is gone.
 		if differsOnlyInWhitespace(content, oldString) {
-			return fmt.Sprintf("(not found: no exact match in %s — a block there differs only in whitespace (indentation/tabs/newlines); copy the exact bytes, including indentation)", path)
+			return fmt.Sprintf("(not found: no exact match in %s - a block there differs only in whitespace (indentation/tabs/newlines); copy the exact bytes, including indentation)", path)
 		}
 		return fmt.Sprintf("(not found: old_string does not appear in %s)", path)
 	}
 	if n > 1 {
-		return fmt.Sprintf("(ambiguous: old_string appears %d times — provide more context to make it unique)", n)
+		return fmt.Sprintf("(ambiguous: old_string appears %d times - provide more context to make it unique)", n)
 	}
 	updated := strings.Replace(content, oldString, newString, 1)
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
@@ -50,7 +50,7 @@ func EditFile(path, oldString, newString string) string {
 }
 
 // differsOnlyInWhitespace reports whether oldString matches content at exactly
-// one spot once every whitespace run is collapsed — i.e. the sole mismatch is
+// one spot once every whitespace run is collapsed: i.e. the sole mismatch is
 // indentation/tabs/newlines. Bounded with spaces so a match can't straddle a
 // token boundary and mislabel an unrelated near-miss.
 func differsOnlyInWhitespace(content, oldString string) bool {
@@ -66,7 +66,7 @@ func EditFileSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        EditFileName,
-			"description": "Surgically replace a single occurrence of old_string with new_string in an existing file. old_string must appear EXACTLY ONCE in the file — include enough surrounding context to make it unique. Prefer this over write_file for any change to an existing file shorter than a full rewrite: small typo fixes, single-line edits, swapping a function body. Errors (not found, ambiguous, file missing) come back as part of the result string, same as bash.",
+			"description": "Surgically replace a single occurrence of old_string with new_string in an existing file. old_string must appear EXACTLY ONCE in the file - include enough surrounding context to make it unique. Prefer this over write_file for any change to an existing file shorter than a full rewrite: small typo fixes, single-line edits, swapping a function body. Errors (not found, ambiguous, file missing) come back as part of the result string, same as bash.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

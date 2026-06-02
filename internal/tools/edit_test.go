@@ -61,7 +61,7 @@ func TestEditFileOldNotFound(t *testing.T) {
 
 // TestEditFileWhitespaceNearMissHint: a miss whose only difference is
 // indentation gets the diagnostic hint, and the file is left untouched (the
-// hint is detection only — never a fuzzy apply).
+// hint is detection only, never a fuzzy apply).
 func TestEditFileWhitespaceNearMissHint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.go")

@@ -57,7 +57,7 @@ func (m *Model) refreshSuggest() {
 	}
 	// Reload cfg on the cmd→arg transition (or a different arg-level command) so
 	// lists like /models <name> reflect external edits before submit. Errors are
-	// silent — runSlash surfaces them on submit, not on every keystroke.
+	// silent: runSlash surfaces them on submit, not on every keystroke.
 	if !m.suggestArgLevel || m.activeCmd != cmdName {
 		_ = m.reloadConfigFromDisk()
 	}
@@ -115,14 +115,14 @@ func (m Model) popoverHeight() int {
 
 // renderPopover draws the suggestion list: value flush left, description right
 // aligned, one row each. Selection is a colour change (stylePopoverSelected);
-// the current row is bold, no colour. No marker/background/box — plain text
+// the current row is bold, no colour. No marker/background/box, plain text
 // with a highlighted row renders cleanest in the terminal.
 func (m Model) renderPopover() string {
 	if !m.suggestOpen {
 		return ""
 	}
 	// Window the rows around the selection: when suggestions exceed popoverCap,
-	// slide start just enough to keep suggestIdx inside [start, start+h) — else
+	// slide start just enough to keep suggestIdx inside [start, start+h). Else
 	// the highlighted row is off-screen and the user commits a row they can't see.
 	h := m.popoverHeight()
 	start := 0

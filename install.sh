@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codehamr installer — fetch the latest release binary and install it into a
+# codehamr installer: fetch the latest release binary and install it into a
 # user-writable prefix so sudo is never needed for the default flow.
 #
 # Usage:
@@ -65,7 +65,7 @@ install -m 0755 "${tmp}/codehamr" "${bindir}/codehamr" 2>/dev/null \
 echo "✓ installed → ${bindir}/codehamr"
 
 # If bindir isn't on PATH, append an export to existing shell rc files so
-# future shells pick it up — idempotent via a fixed marker line. The current
+# future shells pick it up, idempotent via a fixed marker line. The current
 # shell can't be mutated from this child process, so we additionally print
 # one paste-ready line that activates the install without a terminal restart.
 if ! on_path "$bindir"; then

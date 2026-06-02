@@ -24,7 +24,7 @@ type probeMsg struct {
 	profile       string
 	contextWindow int
 	budget        cloud.BudgetStatus
-	silent        bool // suppress the "✓ active" line — startup probe only
+	silent        bool // suppress the "✓ active" line; startup probe only
 	err           error
 }
 
@@ -52,8 +52,9 @@ func probeBackend(cli *llm.Client, profileName string, silent bool) tea.Cmd {
 // profile still update liveContextSize, ready for when the user switches back.
 //
 // Connection-state mutations (m.connected, m.budget) are gated on the probe's
-// profile still being active, so a probe for a finishing after the user
-// /models'd to b can't flip b's reachability indicator on a's stale outcome.
+// profile still being active. A probe for profile a that finishes after the
+// user has /models'd to b can't flip b's reachability indicator on a's stale
+// outcome.
 func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	active := msg.profile == m.cfg.Active
 	if msg.err != nil {
@@ -67,7 +68,7 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		// Silent startup probes print no banner either way; an offline launch
-		// shouldn't greet the user with "⚠ probe". connected=false suffices —
+		// shouldn't greet the user with "⚠ probe". connected=false suffices;
 		// the next user action surfaces the real failure.
 		if !msg.silent {
 			m.appendLine(styleError.Render("⚠ probe " + msg.profile + ": " + probeErrorMessage(msg.err)))
@@ -83,7 +84,7 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	p, ok := m.cfg.Models[msg.profile]
 	if !ok {
 		// Profile vanished between dispatch and return (hand-edited config or
-		// pruned by /models). Skip the cache write — an orphan key would
+		// pruned by /models). Skip the cache write: an orphan key would
 		// accumulate across a long session.
 		return m, nil
 	}
@@ -91,7 +92,7 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 		m.liveContextSize[msg.profile] = msg.contextWindow
 	}
 	// Don't print "✓ active: <profile>" for a stale probe whose profile is no
-	// longer active — that profile isn't active. (liveContextSize is set above.)
+	// longer active. (liveContextSize is set above.)
 	if msg.silent || !active {
 		return m, nil
 	}

@@ -9,7 +9,7 @@ import (
 
 // setProcessGroup gives the shell its own process group and a Cancel that
 // SIGKILLs the whole group. Without it, backgrounded children (`cmd &`) outlive
-// the shell on cancel or timeout — the leak we prevent. Unix-only: Setpgid and
+// the shell on cancel or timeout, the leak we prevent. Unix-only: Setpgid and
 // negative-PID Kill aren't portable (Windows has its own build).
 func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

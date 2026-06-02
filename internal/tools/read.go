@@ -10,7 +10,7 @@ import (
 // ReadFile returns path's contents, truncated to the shared tool-output budget
 // (Truncate). The model gets exact bytes, not a shell-mangled approximation.
 // Per the bash/write/edit convention, filesystem errors come back in the output
-// string, never as a Go error — the model reacts to them like a non-zero exit.
+// string, never as a Go error: the model reacts to them like a non-zero exit.
 func ReadFile(path string) string {
 	if path == "" {
 		return "(empty path)"
@@ -30,7 +30,7 @@ func ReadFileSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        ReadFileName,
-			"description": "Read a file and return its contents. Prefer this over `cat`/`sed` in bash for inspecting a file — no shell quoting, exact bytes. Output over 6k tokens is truncated to first+last 2k; for a slice of a large file use bash with sed/grep/head/tail.",
+			"description": "Read a file and return its contents. Prefer this over `cat`/`sed` in bash for inspecting a file - no shell quoting, exact bytes. Output over 6k tokens is truncated to first+last 2k; for a slice of a large file use bash with sed/grep/head/tail.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

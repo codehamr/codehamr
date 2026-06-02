@@ -21,7 +21,7 @@ const (
 	historyMaxEntryBytes = 256 * 1024
 	// Per-line token ceiling for the bufio scanners that read the file back. A
 	// line at or above this is dropped with ErrTooLong AND halts the scan,
-	// losing every later entry — so appendPromptHistory must never write a
+	// losing every later entry, so appendPromptHistory must never write a
 	// quoted line this long.
 	historyScannerMax = 1024 * 1024
 )
@@ -59,8 +59,8 @@ func loadPromptHistory(dir string) []promptEntry {
 //
 // O_APPEND so two codehamr processes in the same project can each add a
 // line without one's load+rewrite eating the other's submit. The trim is
-// best-effort: an IO error during rewrite leaves the appended file as-is —
-// the next start trims it back down.
+// best-effort: an IO error during rewrite leaves the appended file as-is.
+// The next start trims it back down.
 func appendPromptHistory(dir, value string) error {
 	if value == "" {
 		return nil
@@ -69,7 +69,7 @@ func appendPromptHistory(dir, value string) error {
 		return nil
 	}
 	// Quote expands control/invalid bytes to \xNN (4× each), so a value under
-	// the unquoted cap can still quote past historyScannerMax — and such a line
+	// the unquoted cap can still quote past historyScannerMax, and such a line
 	// halts the scan, losing every newer entry. Decline to store what the
 	// loader can't read back. (bufio needs the token strictly below the buffer
 	// max, hence >=.)
@@ -110,7 +110,7 @@ func appendPromptHistory(dir, value string) error {
 	return nil
 }
 
-// countHistoryLines tallies lines without parsing them — fast path for the
+// countHistoryLines tallies lines without parsing them: fast path for the
 // trim decision in appendPromptHistory.
 func countHistoryLines(path string) (int, error) {
 	f, err := os.Open(path)
@@ -128,7 +128,7 @@ func countHistoryLines(path string) (int, error) {
 }
 
 // clearPromptHistory removes the on-disk file so /clear also wipes recall.
-// A missing file is not an error — the empty-history intent already holds.
+// A missing file is not an error: the empty-history intent already holds.
 func clearPromptHistory(dir string) error {
 	err := os.Remove(historyPath(dir))
 	if os.IsNotExist(err) {

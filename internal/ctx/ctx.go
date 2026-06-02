@@ -31,7 +31,7 @@ type Message struct {
 	ToolName   string     `json:"name,omitempty"`
 }
 
-// Tokens approximates token count as char/4 — good enough for budgeting.
+// Tokens approximates token count as char/4, good enough for budgeting.
 func Tokens(s string) int { return (len(s) + 3) / 4 }
 
 func (m Message) Tokens() int {
@@ -53,7 +53,7 @@ const (
 	// verification-honesty ledger, fail-fast install probe, and trace-read
 	// fallback grew it); the buffer to 4000 keeps prompt edits from silently
 	// over-budgeting small-ctx profiles. A tui test pins this against the live
-	// prompt — bump here when it fails, never relax the assertion.
+	// prompt; bump here when it fails, never relax the assertion.
 	FixedSystem = 4000
 	FixedTools  = 1500
 )
@@ -61,7 +61,7 @@ const (
 // budgetHeadroomDivisor cuts the history budget by 1/this (10%) below the
 // declared window. The char/4 Tokens heuristic UNDERcounts code- and JSON-heavy
 // histories (the real tokenizer emits more per char), so packing to the literal
-// ceiling risks the true token count spilling past the window — on Ollama a
+// ceiling risks the true token count spilling past the window: on Ollama a
 // silent front-truncation that drops the system prompt and the anchored task, on
 // llama.cpp a hard 400. The margin keeps an honest context_size safely in-window.
 const budgetHeadroomDivisor = 10
@@ -88,7 +88,7 @@ func Truncate(out string) string {
 	limit := ToolHeadTail * 4
 	head := runeBoundaryDown(out, limit)
 	tail := runeBoundaryUp(out, len(out)-limit)
-	marker := fmt.Sprintf("\n───── truncated: %d tokens total — first %d + last %d shown, the middle is OMITTED. This is a PARTIAL view; you can't review or conclude from code you can't see here — re-run narrower (grep/sed/head/tail) to read the omitted span. ─────\n",
+	marker := fmt.Sprintf("\n───── truncated: %d tokens total, first %d + last %d shown, the middle is OMITTED. This is a PARTIAL view; you can't review or conclude from code you can't see here, so re-run narrower (grep/sed/head/tail) to read the omitted span. ─────\n",
 		total, ToolHeadTail, ToolHeadTail)
 	return out[:head] + marker + out[tail:]
 }
@@ -130,12 +130,12 @@ type PackResult struct {
 // answered (the cancel-mid-tool case), and dropOrphanTools drops tool messages
 // whose assistant.tool_calls ancestor got trimmed off the top. Both directions
 // 400 every OpenAI-compatible backend, so both are stripped before the wire.
-// A final anchorUserMessage pass guarantees the window is never userless — the
+// A final anchorUserMessage pass guarantees the window is never userless: the
 // third shape that 400s every backend, and the one a long single turn reaches
 // when the budget walk evicts the sole user task. demoteSystemMessages then runs
 // last, rewriting any surviving system note to a user message: the wire is always
-// prefixed by the embedded system prompt, so a fourth shape — a second, non-leading
-// system message — 400s strict backends, and that note is only ever a soft-nudge.
+// prefixed by the embedded system prompt, so a fourth shape (a second, non-leading
+// system message) 400s strict backends, and that note is only ever a soft-nudge.
 func Pack(history []Message, budget int) PackResult {
 	kept := make([]Message, 0, len(history))
 	used := 0
@@ -156,17 +156,17 @@ func Pack(history []Message, budget int) PackResult {
 	// dropOrphanTools can empty the kept set when the newest message is a tool
 	// result whose owning assistant fell just past the budget cut: the always-
 	// keep-newest guard keeps the lone tool, then the orphan drop removes it,
-	// leaving nothing — so the next request would carry only the system prompt
+	// leaving nothing, so the next request would carry only the system prompt
 	// and silently lose the whole conversation mid-turn (reachable on small-ctx
 	// profiles after a big tool output). Recover the newest assistant+tool-results
-	// group whole, over budget if need be — the same deliberately-over-budget
+	// group whole, over budget if need be, with the same deliberately-over-budget
 	// guarantee a newest user message already gets.
 	if len(kept) == 0 {
 		// Recover the group over budget, then re-run the same two passes the
 		// normal path uses: a partially-answered parallel set (owner issued c1,c2
 		// but only c1 came back before an abort) would otherwise reach the wire as
 		// a dangling assistant and 400 every backend. Fully-answered groups pass
-		// through untouched; an unpairable partial empties to nothing — a
+		// through untouched; an unpairable partial empties to nothing, a
 		// well-formed system-only request, not a 400.
 		kept = newestToolGroup(history)
 		kept = dropDanglingToolCalls(kept)
@@ -182,10 +182,10 @@ func Pack(history []Message, budget int) PackResult {
 
 // anchorUserMessage guarantees the packed window carries a user-role message
 // whenever history has one. The newest-first walk drops oldest-first, so a long
-// single turn — one task message, then dozens of assistant+tool rounds that fill
-// the budget — evicts the sole user task and hands the backend a userless window,
+// single turn (one task message, then dozens of assistant+tool rounds that fill
+// the budget) evicts the sole user task and hands the backend a userless window,
 // which 400s every OpenAI-compatible server ("no user query found in messages").
-// When no user survived, recover the FIRST user message (the original task — the
+// When no user survived, recover the FIRST user message (the original task, the
 // agent's anchor against drift), prepended chronologically over budget: the same
 // deliberately-over-budget guarantee newestToolGroup and the always-keep-newest
 // path already make. A lone user message carries no tool-call pairing, so this is
@@ -208,12 +208,12 @@ func anchorUserMessage(kept, history []Message) []Message {
 // demoteSystemMessages rewrites every system-role message in the packed history
 // to a user message. buildMessages always prepends the embedded system prompt as
 // wire element 0, so any system message Pack returns is a SECOND, non-leading
-// system message — which strict OpenAI-compat backends reject outright ("System
+// system message, which strict OpenAI-compat backends reject outright ("System
 // message must be at the beginning"; observed on strict backends like Ollama
 // and llama.cpp), the same class of wire-shape 400 the dangling/orphan/userless passes
 // guard against. The only system content reaching history is a soft-nudge note
-// (the embedded prompt is never stored there), so demoting to user keeps that note
-// — automated-check prefix and all — in front of the model while keeping the wire
+// (the embedded prompt is never stored there), so demoting to user keeps that note,
+// automated-check prefix and all, in front of the model while keeping the wire
 // legal everywhere. Must run AFTER anchorUserMessage: a demoted nudge would
 // otherwise masquerade as a surviving user message and suppress the original-task
 // anchor. Mutates only the copied kept slice, never history.
@@ -227,7 +227,7 @@ func demoteSystemMessages(kept []Message) []Message {
 }
 
 // newestToolGroup returns the assistant that issued the newest tool result
-// together with every tool result answering it, chronologically — the minimal
+// together with every tool result answering it, chronologically: the minimal
 // well-formed unit that honours "always keep the newest" when the newest
 // history message is a tool result. nil when the newest message isn't an
 // identifiable tool result (the budget walk already keeps non-tool newests) or
@@ -257,7 +257,7 @@ search:
 		return nil
 	}
 	// Parallel tool calls put [assistant(c1,c2), tool(c1), tool(c2)] at the tail,
-	// so collect every tool result whose id the owning assistant issued — not
+	// so collect every tool result whose id the owning assistant issued, not
 	// just the immediately-preceding one.
 	ids := map[string]bool{}
 	for _, tc := range history[owner].ToolCalls {
@@ -275,7 +275,7 @@ search:
 }
 
 // dropOrphanTools removes tool messages whose tool_call_id has no matching
-// assistant.tool_calls entry earlier in the slice — sending one alone 400s on
+// assistant.tool_calls entry earlier in the slice: sending one alone 400s on
 // every OpenAI-compatible backend ("tool message without preceding
 // tool_calls").
 //
@@ -302,7 +302,7 @@ func dropOrphanTools(kept []Message) []Message {
 }
 
 // dropDanglingToolCalls removes any assistant message whose tool_calls include
-// an id with no answering tool message in the kept slice — the mirror of
+// an id with no answering tool message in the kept slice: the mirror of
 // dropOrphanTools. An assistant.tool_calls followed by fewer tool results than
 // calls issued 400s every OpenAI-compatible backend with "missing tool
 // response". This shape is produced whenever a turn is aborted mid-tool: the
@@ -310,7 +310,7 @@ func dropOrphanTools(kept []Message) []Message {
 // / stream-error / idle-stall then drops the pending calls so their tool results
 // never arrive (see tui.endTurn). On the user's next request that dangling
 // assistant would otherwise reach the wire and wedge the conversation until
-// /clear. Empty ids count as unanswered — an unidentifiable call can't be paired.
+// /clear. Empty ids count as unanswered: an unidentifiable call can't be paired.
 func dropDanglingToolCalls(kept []Message) []Message {
 	answered := map[string]bool{}
 	for _, m := range kept {

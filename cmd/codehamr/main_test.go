@@ -6,7 +6,7 @@ import (
 )
 
 // TestIsLocalBuild pins the contract: `go run` ("dev") and dirty-tree builds
-// are local and skip self-update — else an older release overwrites unreleased
+// are local and skip self-update; else an older release overwrites unreleased
 // work. Clean semver tags still self-update.
 func TestIsLocalBuild(t *testing.T) {
 	cases := []struct {
@@ -37,6 +37,6 @@ func TestReexecGuardOverridesPreexistingValue(t *testing.T) {
 	t.Setenv("CODEHAMR_NO_UPDATE_CHECK", "0") // user set it wrong; restored after test
 	os.Setenv("CODEHAMR_NO_UPDATE_CHECK", "1")
 	if got := os.Getenv("CODEHAMR_NO_UPDATE_CHECK"); got != "1" {
-		t.Fatalf("guard env resolves to %q, want \"1\" — append() would have left \"0\" first", got)
+		t.Fatalf("guard env resolves to %q, want \"1\" - append() would have left \"0\" first", got)
 	}
 }

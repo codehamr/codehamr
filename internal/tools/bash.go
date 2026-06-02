@@ -24,12 +24,12 @@ const (
 )
 
 // maxBashTimeoutSeconds caps the per-call timeout_seconds the model can
-// request — backstop against runaway loops (`sleep 99999`, `while true`)
+// request, a backstop against runaway loops (`sleep 99999`, `while true`)
 // that would otherwise tie up the turn until Ctrl+C.
 const maxBashTimeoutSeconds = 3600
 
 // Bash runs one shell command through /bin/sh -c and returns combined
-// stdout+stderr. Non-zero exit is not an error — the model sees the failure
+// stdout+stderr. Non-zero exit is not an error; the model sees the failure
 // and reacts.
 //
 // A pre-cancelled parent (Ctrl+C raced the dispatch) returns "(cancelled)"
@@ -61,16 +61,16 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 		case ctxT.Err() == context.DeadlineExceeded:
 			return s + fmt.Sprintf("\n(timeout after %s)", timeout)
 		case parent.Err() == context.Canceled || ctxT.Err() == context.Canceled:
-			// User Ctrl+C — name it rather than leak "signal: killed" noise.
+			// User Ctrl+C; name it rather than leak "signal: killed" noise.
 			return s + "\n(cancelled)"
 		case errors.Is(err, exec.ErrWaitDelay):
 			// Shell exited 0; err is non-nil only because a backgrounded child
-			// held the pipes past WaitDelay — not a failure. Return output as-is
+			// held the pipes past WaitDelay, not a failure. Return output as-is
 			// so it isn't mislabeled with a spurious (exit: ...). After the
 			// cancel/timeout cases so those signals win over a coincident delay.
 			return s
 		default:
-			// Exit errors go into the output — exactly what the model needs.
+			// Exit errors go into the output, exactly what the model needs.
 			s += fmt.Sprintf("\n(exit: %v)", err)
 		}
 	}
@@ -118,11 +118,11 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 	// A truncated/oversized tool call leaves llm.resolve()'s _parse_error
 	// sentinel where real args should be. Without this guard the call falls
 	// through to an empty path/cmd and returns a misleading "(empty path)",
-	// hiding that the server cut the arguments at its output-token limit — the
+	// hiding that the server cut the arguments at its output-token limit, the
 	// failure that makes a model re-emit the same too-large write for minutes.
 	// Name the real cause and the recovery so it self-corrects in one step.
 	if msg, ok := call.Arguments["_parse_error"].(string); ok {
-		return fmt.Sprintf("(tool arguments were not valid JSON: %s — most likely the "+
+		return fmt.Sprintf("(tool arguments were not valid JSON: %s, most likely the "+
 			"content was too large and the server truncated the call at its output-token "+
 			"limit. Do NOT retry the same whole-file write. Build the file in chunks with "+
 			"bash heredoc append: `cat > path <<'EOF'` … `EOF` for the first part, then "+
@@ -134,7 +134,7 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 		cmd, _ := call.Arguments["cmd"].(string)
 		// Default 2m, overridable per call up to 1h. Clamp seconds BEFORE the
 		// Duration multiply: 1e18 would overflow int64 into a negative duration,
-		// and 0.5 would truncate to 0 and cancel before the shell runs — so
+		// and 0.5 would truncate to 0 and cancel before the shell runs, so
 		// floor at 1.
 		timeout := 2 * time.Minute
 		if secs, ok := call.Arguments["timeout_seconds"].(float64); ok && secs > 0 {

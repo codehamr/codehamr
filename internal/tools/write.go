@@ -7,7 +7,7 @@ import (
 )
 
 // WriteFile writes content to path, creating parent dirs. Errors return as
-// part of the output string (bash convention), never as a Go error — so the
+// part of the output string (bash convention), never as a Go error, so the
 // model sees a write failure the way it sees a non-zero bash exit.
 func WriteFile(path, content string) string {
 	if path == "" {
@@ -32,7 +32,7 @@ func WriteFileSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        WriteFileName,
-			"description": "Write content bytes to a file at path. Creates parent directories. Overwrites existing files. Use this instead of bash heredocs for multi line content or content with single quotes, dollar signs, or backticks — no shell quoting issues.",
+			"description": "Write content bytes to a file at path. Creates parent directories. Overwrites existing files. Use this instead of bash heredocs for multi line content or content with single quotes, dollar signs, or backticks - no shell quoting issues.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -11,7 +11,7 @@ import (
 
 // humanTokens renders a token count compactly: `900 tok`, `1.2k tok`, `1.5M
 // tok`. The k/M ranges always keep one decimal (`2.0k`, not `2k`) so the live
-// counter holds a constant width as it ticks past round thousands — it reads
+// counter holds a constant width as it ticks past round thousands: it reads
 // `1.9k → 2.0k → 2.1k`, not a jumpy `1.9k → 2k → 2.1k`.
 func humanTokens(n int) string {
 	switch {
@@ -49,7 +49,7 @@ func liveElapsed(d time.Duration) string {
 
 // humanRate renders throughput: `25 tok/s`, `5.3 tok/s`. Returns "" on
 // degenerate input (no tokens or zero elapsed) so the caller omits the
-// segment. Sub-10 tok/s keeps one decimal — reasoning models sit at 1.x
+// segment. Sub-10 tok/s keeps one decimal: reasoning models sit at 1.x
 // where that decimal is the only signal; above 10 it's noise.
 func humanRate(tokens int, d time.Duration) string {
 	if tokens <= 0 || d <= 0 {

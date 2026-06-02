@@ -1,5 +1,5 @@
 @echo off
-REM codehamr Windows installer — fetch the latest release binary and install it
+REM codehamr Windows installer: fetch the latest release binary and install it
 REM into a user-writable prefix so admin elevation is never needed.
 REM
 REM Usage (cmd.exe):
@@ -83,7 +83,7 @@ REM --- Patch the LIVE session PATH so cmd.exe users can run codehamr immediatel
 REM     without opening a new terminal. Propagated past `endlocal` via the standard
 REM     `endlocal ^& set` idiom (PATH is captured at parse time, then restored to
 REM     the parent scope). This will NOT reach a parent PowerShell process if the
-REM     script was launched from one — that's a Windows limitation, not a bug; the
+REM     script was launched from one; that's a Windows limitation, not a bug; the
 REM     persistent setx above still covers the next terminal.
 echo ;%PATH%; | findstr /I /C:";%bindir%;" >nul
 if errorlevel 1 set "PATH=%bindir%;%PATH%"

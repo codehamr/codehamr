@@ -106,7 +106,7 @@ type Model struct {
 	scroll *strings.Builder
 
 	// reasoning accumulates the current round's chain-of-thought (EventReasoning)
-	// for the debug log only — it never enters history (see llm.EventReasoning).
+	// for the debug log only; it never enters history (see llm.EventReasoning).
 	// Pointer like streaming/scroll: Model is copied by value across bubbletea
 	// and strings.Builder must not be copied after first use. Only written when
 	// logging is on; reset every round in applyDone and on abort.
@@ -128,7 +128,7 @@ type Model struct {
 	turnTokens    int
 	sessionTokens int
 	// turnStart stamps the wall-clock start of the current turn, set in beginTurn
-	// (the user-submit path only — tool re-entry bypasses it), so it spans every
+	// (the user-submit path only; tool re-entry bypasses it), so it spans every
 	// tool round rather than resetting per round. The status bar ticks
 	// liveElapsed(time.Since(turnStart)) while a turn runs.
 	turnStart time.Time
@@ -187,48 +187,48 @@ type Model struct {
 	status string // transient status-bar warning (cleared next render cycle)
 	phase  phase  // idle / thinking / streaming / running
 
-	// Repeated-failure nudge — the only deterministic backstop. A turn
+	// Repeated-failure nudge, the only deterministic backstop. A turn
 	// otherwise ends purely when the model stops calling tools; nothing forces
 	// a tool or yields. lastToolKey is the most recently dispatched tool's
 	// target identity (set in dispatchNextTool); failKey/failStreak track how
 	// often that SAME target failed the SAME way. At maxToolFailStreak we inject
-	// one system note to change approach — a nudge, never a hard yield. Keyed on
+	// one system note to change approach: a nudge, never a hard yield. Keyed on
 	// tool+target (not full args) so cosmetic retry differences can't defeat it.
 	lastToolKey string
 	failKey     string
 	failStreak  int
 
-	// Runaway-iteration nudge — sibling to the failure nudge. A 30B model can
+	// Runaway-iteration nudge, sibling to the failure nudge. A 30B model can
 	// loop on plausible *non-failing* calls (re-read, re-grep, re-list) forever;
 	// the failure streak only catches repeated *failures*, so that hole stayed
 	// open. toolRounds counts tool calls dispatched this turn (reset in endTurn);
 	// at maxToolRounds one soft system note asks the model to self-assess. A
-	// nudge, never a hard yield — same contract as maybeFailureNudge.
+	// nudge, never a hard yield, same contract as maybeFailureNudge.
 	// runawayNudged latches the nudge to once per turn: a multi-tool-call round
 	// can step toolRounds past maxToolRounds between drain-time checks, so a bare
 	// equality test could skip the threshold entirely.
 	toolRounds    int
 	runawayNudged bool
 
-	// Empty-reply nudge — the third soft backstop. The two above catch doing-too-
+	// Empty-reply nudge, the third soft backstop. The two above catch doing-too-
 	// much; this catches a turn ending with nothing said and nothing called. A
 	// clean finish always carries a summary and a continuing turn always carries a
 	// tool call, so an empty newest assistant message is always an anomaly: the
 	// model stopped mid-task, or (on a thinking model) its tool call streamed into
-	// the reasoning channel and was dropped before reaching us — the dominant
+	// the reasoning channel and was dropped before reaching us, the dominant
 	// silent-death we'd otherwise end on with no warning. One re-prompt to re-issue
 	// or finish; emptyNudged latches it to once per turn so a server that
 	// deterministically swallows the call can't loop. Reset in endTurn.
 	emptyNudged bool
 
-	// Finish re-grounding nudge — the fourth soft backstop. The three above catch
+	// Finish re-grounding nudge, the fourth soft backstop. The three above catch
 	// doing-too-much (failure, runaway) and stopping-with-nothing-said (empty).
 	// This catches the false-green finish: a turn that did real work ending with a
 	// confident summary for something it never actually ran. When a substantial
 	// turn (toolRounds >= verifyNudgeMinRounds) is about to finish with a clean,
 	// non-empty reply, one re-prompt makes the model re-walk the original request
-	// and run the check that proves each runnable part — or mark it unverified
-	// honestly — instead of dressing up a brace-count or an HTTP 200 as proof. A
+	// and run the check that proves each runnable part, or mark it unverified
+	// honestly, instead of dressing up a brace-count or an HTTP 200 as proof. A
 	// nudge, never a hard yield; verifyNudged latches it to once per turn. Reset in
 	// endTurn.
 	verifyNudged bool
@@ -245,7 +245,7 @@ type Model struct {
 func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model {
 	ta := newPromptInput()
 
-	// Fixed dark style — WithAutoStyle queries the terminal (OSC 11) before
+	// Fixed dark style: WithAutoStyle queries the terminal (OSC 11) before
 	// bubbletea grabs raw stdin, so the reply bytes leak into the textarea as
 	// "1;rgb:1e1e/1e1e/1e1e" garbage. Dev containers are dark: no query, no leak.
 	r, _ := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(defaultWidth-4))
@@ -264,7 +264,7 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 		renderer:   r,
 		spinner:    sp,
 		connected:  true, // optimistic until the first ping proves otherwise
-		// width/height left at 0 — View() returns "" until the first
+		// width/height left at 0; View() returns "" until the first
 		// WindowSizeMsg, so we don't flash an 80×24 frame then resize.
 		streaming:       new(strings.Builder),
 		scroll:          new(strings.Builder),
@@ -274,7 +274,7 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 	}
 	// Record the active backend + budget once, before any turn, so a shared log
 	// names exactly which model/endpoint/context window produced the behaviour.
-	// Gated on dbgEnabled so the profile derefs run only when logging is on —
+	// Gated on dbgEnabled so the profile derefs run only when logging is on;
 	// off (the default) means New behaves exactly as before.
 	if dbgEnabled() {
 		dbgWriteSession(version, cfg.Active, cfg.ActiveProfile().LLM, cfg.ActiveURL(),
@@ -284,14 +284,14 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 	// Seed prompt history from .codehamr/history so ↑ recalls prompts from
 	// earlier sessions. Loaded entries carry no chip metadata (the on-disk
 	// format stores expanded text only), so a recalled multi-line paste
-	// appears uncollapsed — the right tradeoff for a cat-friendly history file.
+	// appears uncollapsed, the right tradeoff for a cat-friendly history file.
 	m.promptHistory = loadPromptHistory(cfg.Dir)
 	return m
 }
 
 // activeContextSize returns the context window the packer should aim at: the
 // live server-reported value for the active profile if known, else the on-disk
-// ContextSize, else defaultPackFallback — so cloud profiles before their first
+// ContextSize, else defaultPackFallback, so cloud profiles before their first
 // response (and any missing/zero value) still get a sensible budget.
 func (m *Model) activeContextSize() int {
 	if v, ok := m.liveContextSize[m.cfg.Active]; ok && v > 0 {
@@ -309,7 +309,7 @@ func (m *Model) activeContextSize() int {
 const defaultPackFallback = 32768
 
 // resizeSettleDelay debounces width-resize bursts: longer than typical drag
-// SIGWINCH cadence (10–50ms) so a continuous drag collapses to one settle,
+// SIGWINCH cadence (10-50ms) so a continuous drag collapses to one settle,
 // short enough that a one-off resize feels instant.
 const resizeSettleDelay = 150 * time.Millisecond
 
@@ -331,14 +331,14 @@ type pingMsg struct {
 	baseURL string
 }
 
-// quitArmResetMsg fires ~3s after Ctrl+C arms the quit — if not already quit or
+// quitArmResetMsg fires ~3s after Ctrl+C arms the quit: if not already quit or
 // re-armed, clear the hint from the status bar.
 type quitArmResetMsg struct{}
 
 func (m Model) Init() tea.Cmd {
 	// Keyed (cloud) profiles get a silent Probe at startup so the status bar
 	// renders the live budget / context window from the first frame. Keyless
-	// (local Ollama) profiles get the cheaper Reachable ping — no headers to
+	// (local Ollama) profiles get the cheaper Reachable ping: no headers to
 	// harvest, so a full probe would buy nothing.
 	connectivity := pingBackend(m.cli.BaseURL)
 	if p := m.cfg.ActiveProfile(); p != nil && p.Key != "" {
@@ -354,7 +354,7 @@ func (m Model) Init() tea.Cmd {
 // Update is the bubbletea entry point: it dispatches to update()'s typed
 // handlers then drains the outbox into a single tea.Println, so lines land in
 // scrollback in the exact order appendLine / flushStreaming queued them. One
-// Println per cycle, never a Batch — Batch runs children concurrently, leaving
+// Println per cycle, never a Batch; Batch runs children concurrently, leaving
 // arrival order undefined, so splash lines and tool-call banners would shuffle.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
@@ -372,7 +372,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.FocusMsg, tea.BlurMsg:
 		// Terminal focus reports (CSI I / CSI O) arrive as these typed msgs
 		// under tea.WithReportFocus. Swallow them so they never reach
-		// textarea.Update — otherwise the escape fragments get parsed as
+		// textarea.Update; otherwise the escape fragments get parsed as
 		// printable runes, inserted into the prompt, and bloat textarea height
 		// on every focus switch.
 		return m, nil
@@ -433,7 +433,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStream(msg.e)
 
 	case streamClosedMsg:
-		// Stale close from the prior turn's channel — running handleStreamClosed
+		// Stale close from the prior turn's channel; running handleStreamClosed
 		// would nil out the live m.stream and, worse, finalizeTurn + endTurn the
 		// active turn, killing the user's request out from under them.
 		if msg.ch != m.stream {
@@ -461,7 +461,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.pending) > 0 {
 			return m.dispatchNextTool()
 		}
-		// Queue drained — only now is it safe to inject a system nudge. A
+		// Queue drained: only now is it safe to inject a system nudge. A
 		// system message wedged between assistant.tool_calls and its tool
 		// results would break that pairing and 400 the next request.
 		m.maybeFailureNudge()
@@ -496,7 +496,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.ta.SetWidth(msg.Width - 2)
 	if first || widthChanged {
 		// Glamour compiles a stylesheet + template tree per build, so rebuild
-		// only on a real wrap-width change — height-only events and intra-drag
+		// only on a real wrap-width change; height-only events and intra-drag
 		// duplicates reuse the existing renderer.
 		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(max(msg.Width-4, 1))); err == nil {
@@ -529,7 +529,7 @@ func (m Model) handleResizeSettle(msg resizeSettleMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.suppressView = false
-	// tea.Sequence keeps order strict — Batch would race the clears with the
+	// tea.Sequence keeps order strict; Batch would race the clears with the
 	// writes. After the wipe every line below is emitted at the current width,
 	// so no previous-width row can soft-wrap into stair-steps.
 	cmds := []tea.Cmd{tea.ClearScreen, eraseScrollback}
@@ -564,7 +564,7 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		echoText = safeText
 		entry = promptEntry{display: safeText}
 	}
-	// Echo to scrollback with the same accent ▌ the textarea uses — one visual
+	// Echo to scrollback with the same accent ▌ the textarea uses, one visual
 	// language for "your voice" across live input and history.
 	m.appendLine(stylePrompt.Render("▌ ") + styleUser.Render(echoText))
 	m.promptHistory = append(m.promptHistory, entry)
@@ -578,7 +578,7 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		dbgWritef("user_slash", "%s", safeText)
 		return m.runSlash(sendText)
 	}
-	// A new user message is a new goal — drop any in-progress failure streak so
+	// A new user message is a new goal: drop any in-progress failure streak so
 	// a stale count can't trip the nudge early. History persists; only the
 	// counter resets.
 	m.failKey, m.failStreak = "", 0
@@ -623,12 +623,12 @@ func (m *Model) appendUserTurn(content string) tea.Cmd {
 
 // endTurn zeroes per-turn state after a turn finishes or aborts. Pair to
 // beginTurn. Cancels the per-turn context unconditionally to release the
-// CancelFunc — Background-rooted contexts otherwise leak one child cancelCtx
+// CancelFunc; Background-rooted contexts otherwise leak one child cancelCtx
 // per turn until the process exits. Drops pending tool calls so a turn cut
 // short mid-dispatch (Ctrl+C or error) can't leak a leftover call into the next
 // turn, which would dispatch with stale args and append an orphan tool_result
 // whose tool_call_id no longer pairs the latest assistant message. Does NOT
-// touch scrollback — callers decide whether to flush streaming or emit a banner.
+// touch scrollback; callers decide whether to flush streaming or emit a banner.
 func (m *Model) endTurn() {
 	if m.cancel != nil {
 		m.cancel()
@@ -655,7 +655,7 @@ func (m *Model) buildMessages() []chmctx.Message {
 }
 
 // buildTools exposes the four local tools every turn: bash, read_file,
-// write_file, edit_file. No loop/control tool — a turn ends when the model
+// write_file, edit_file. No loop/control tool; a turn ends when the model
 // stops emitting tool calls (see handleStreamClosed).
 func (m *Model) buildTools() []llm.Tool {
 	return []llm.Tool{
@@ -682,7 +682,7 @@ func schemaToTool(s map[string]any) llm.Tool {
 
 // handleStream dispatches one llm.Event to the matching apply* helper and
 // re-arms the stream reader; EventError unwinds the turn instead of looping.
-// Events arriving after cancellation are drained quietly — acting on them would
+// Events arriving after cancellation are drained quietly; acting on them would
 // corrupt scroll (EventContent), re-populate pending (EventToolCall), or credit
 // a dead turn's tokens (EventDone).
 func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
@@ -697,7 +697,7 @@ func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
 		// no user-facing content yet. Hidden from the transcript (not written
 		// to scroll); only the live token estimate ticks up in the status bar.
 		// When logging, accumulate it so the round's chain-of-thought lands in
-		// the debug log — the highest-signal record for understanding why the
+		// the debug log, the highest-signal record for understanding why the
 		// model chose a tool or went wrong.
 		m.streamingEstimate += len(e.Content) / 4
 		if dbgEnabled() {
@@ -707,7 +707,7 @@ func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
 		// Tool-call arguments stream as the model writes a file (write_file /
 		// edit_file) or a bash command. Count them live like content so the
 		// counter doesn't freeze through a long file write, and flip to
-		// "generating" — the model is producing output, not thinking. The
+		// "generating": the model is producing output, not thinking. The
 		// resolved call still arrives whole as EventToolCall; this only feeds
 		// the estimate, nothing reaches history here.
 		if m.phase == phaseThinking {
@@ -747,7 +747,7 @@ func (m *Model) applyToolCall(e llm.Event) {
 
 // applyDone closes one LLM round: harvest the live context window, accumulate
 // turn/session tokens, append the assistant message, flush streaming. A turn
-// with tool calls fires one EventDone per round — counters accumulate so the
+// with tool calls fires one EventDone per round; counters accumulate so the
 // banner reflects the whole turn. Tokens==0 means the backend skipped
 // include_usage; the char/4 estimate carries the counter on those servers.
 func (m *Model) applyDone(e llm.Event) {
@@ -764,7 +764,7 @@ func (m *Model) applyDone(e llm.Event) {
 	m.streamingEstimate = 0
 	m.connected = true
 	// Round-level reasoning first (it preceded the answer), then the assistant
-	// message, then the round metrics — so the log reads in causal order.
+	// message, then the round metrics, so the log reads in causal order.
 	if r := m.reasoning.String(); r != "" {
 		dbgWritef("reasoning", "%s", r)
 	}
@@ -808,13 +808,13 @@ func (m *Model) abortTurn(banner string) {
 		m.appendLine(banner)
 	}
 	// finalizeTurn folds the in-flight estimate into the counters and zeroes it,
-	// so the avg counts what was generated up to the interrupt — don't drop it here.
+	// so the avg counts what was generated up to the interrupt; don't drop it here.
 	m.finalizeTurn(outcomeStopped)
 	m.endTurn() // drops pending tool calls along with the rest of the turn state
 }
 
 // finalizeTurn freezes the finished turn's wall-clock summary into the status
-// bar — shown at idle until the next submit — and logs the totals. outcome is
+// bar (shown at idle until the next submit) and logs the totals. outcome is
 // the finish glyph: ✓ clean, ✗ abort/stall. The bar's avg tok/s divides
 // lastTokens by lastElapsed (wall-clock), so it stays self-verifying against
 // the duration shown right beside it. There is no scrollback banner: the footer
@@ -827,7 +827,7 @@ func (m *Model) finalizeTurn(outcome turnOutcome) {
 	// Commit the in-flight round's live estimate before measuring. On a clean
 	// finish it's already 0 (applyDone folded the round into turnTokens at
 	// EventDone). But a Ctrl+C or error mid-stream interrupts before EventDone,
-	// so the cancelled round's tokens — often the whole generation — sit only in
+	// so the cancelled round's tokens (often the whole generation) sit only in
 	// streamingEstimate; without this they'd vanish from the avg and the session
 	// total would drop backward. char/4 is the best count for a round that never
 	// reported usage.
@@ -849,7 +849,7 @@ func (m *Model) finalizeTurn(outcome turnOutcome) {
 }
 
 // handleStreamClosed drives what happens after one round's stream finishes:
-// dispatch the next pending tool call, or — if none — finalize the turn and
+// dispatch the next pending tool call, or, if none, finalize the turn and
 // hand control back. A turn ends precisely when the assistant emits no tool
 // calls; there is no loop tool to land on.
 func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
@@ -860,11 +860,11 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if len(m.pending) > 0 {
-		// The model issued a tool call — genuine progress. Re-arm the empty-reply
+		// The model issued a tool call, genuine progress. Re-arm the empty-reply
 		// latch so a LATER transient empty on this same (long) turn earns its own
 		// re-prompt instead of hitting the leak-and-die branch below. The latch
 		// exists to stop a server that deterministically swallows EVERY call, not
-		// to cap recoveries on a turn that keeps advancing — a flaky stream that
+		// to cap recoveries on a turn that keeps advancing: a flaky stream that
 		// drops the occasional call must not abandon a half-built file (the galaxy1
 		// failure: empty → nudge → recovered with a write → empty again → died).
 		// Two CONSECUTIVE empties still terminate: pending is 0 on that path, so
@@ -878,7 +878,7 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 	// reaches us as content or a structured call). Re-prompt once to re-issue or
 	// finish; the emptyNudged latch bounds it to a single retry so a server that
 	// deterministically swallows the call can't loop. If it persists, surface it
-	// rather than dying silently — the prior behaviour left a half-done artifact
+	// rather than dying silently: the prior behaviour left a half-done artifact
 	// with no banner at all.
 	outcome := outcomeDone // a clean, non-empty finish; stall/leak below downgrade it
 	if newestAssistantEmpty(m.history) {
@@ -887,12 +887,12 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 			dbgWritef("nudge", "empty-reply nudge injected (turn ended with no content and no tool call)")
 			m.history = append(m.history, chmctx.Message{
 				Role:    chmctx.RoleSystem,
-				Content: nudgeOrigin + "Your last turn ended with no reply and no tool call. If you meant to call a tool and it did not run, issue it again now as a proper tool call. If you are still working, continue. If the task is done, check it against the original request — actually run or drive what proves it works — then reply with a one-line summary.",
+				Content: nudgeOrigin + "Your last turn ended with no reply and no tool call. If you meant to call a tool and it did not run, issue it again now as a proper tool call. If you are still working, continue. If the task is done, check it against the original request - actually run or drive what proves it works - then reply with a one-line summary.",
 			})
 			m.phase = phaseThinking
 			return m, m.startChat()
 		}
-		m.appendLine(styleError.Render("⚠ the model ended its turn with no reply and no tool call — it stalled, or your server dropped the call. If thinking is on, its reasoning parser may be swallowing calls — enable one (e.g. vLLM `--reasoning-parser`) or disable thinking for tool turns."))
+		m.appendLine(styleError.Render("⚠ the model ended its turn with no reply and no tool call - it stalled, or your server dropped the call. If thinking is on, its reasoning parser may be swallowing calls - enable one (e.g. vLLM `--reasoning-parser`) or disable thinking for tool turns."))
 		dbgWritef("leak", "turn ended with an empty assistant message after a re-prompt (model stalled or the call was swallowed server-side)")
 		outcome = outcomeStopped
 	} else if w := toolCallLeakWarning(m.history); w != "" {
@@ -903,8 +903,8 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 		outcome = outcomeStopped
 	} else if m.maybeVerifyNudge() {
 		// A substantial turn is finishing with a clean, non-empty summary. Re-ground
-		// it once to the original request and let the model verify — or honestly mark
-		// unverified — before it hands control back. Mirrors the empty-reply re-prompt:
+		// it once to the original request and let the model verify (or honestly mark
+		// unverified) before it hands control back. Mirrors the empty-reply re-prompt:
 		// applyDone already flushed this summary to scrollback and appended it to
 		// history, so the streaming buffer is clean and startChat resumes safely.
 		m.phase = phaseThinking
@@ -918,7 +918,7 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 // newestAssistantEmpty reports whether the turn's final assistant message
 // carried neither text nor a structured tool call. A clean finish always has a
 // summary and a continuing turn always has a tool call, so an empty newest
-// assistant message is always an anomaly — the model stopped mid-task, or its
+// assistant message is always an anomaly: the model stopped mid-task, or its
 // call streamed into the reasoning channel and was dropped before reaching us.
 func newestAssistantEmpty(history []chmctx.Message) bool {
 	for i := len(history) - 1; i >= 0; i-- {
@@ -931,7 +931,7 @@ func newestAssistantEmpty(history []chmctx.Message) bool {
 }
 
 // newestAssistantUnverified reports whether the turn's final assistant message
-// already carries an "unverified" marker — the honest self-assessment the finish
+// already carries an "unverified" marker, the honest self-assessment the finish
 // nudge exists to elicit. Case-insensitive: the model writes "unverified" /
 // "Unverified" interchangeably. Used to suppress the finish nudge on a finish
 // that already named what it couldn't prove (see maybeVerifyNudge).
@@ -947,12 +947,12 @@ func newestAssistantUnverified(history []chmctx.Message) bool {
 
 // toolCallLeakWarning returns a user-facing diagnostic when the newest assistant
 // message carries a tool-call opener (`<tool_call>`) in its text instead of
-// structured tool_calls — the dominant local-hosting failure: a
+// structured tool_calls, the dominant local-hosting failure: a
 // misconfigured/missing server parser leaks the call as content with
 // finish_reason "stop", so the turn ends silently with the tool intent stranded.
 // The bare `<tool_call>` opener covers both shapes the target servers emit: the
 // XML body (`<function=…`) and the general JSON body
-// (`{"name":…`) — gating on the literal tag alone catches both while staying
+// (`{"name":…`): gating on the literal tag alone catches both while staying
 // specific enough that ordinary prose can't trip it. A message that carried a
 // real structured call never leaked, even if its prose quotes the tag, so a
 // non-empty ToolCalls short-circuits to clean. codehamr stays wire-only (it does
@@ -964,10 +964,10 @@ func toolCallLeakWarning(history []chmctx.Message) string {
 			continue
 		}
 		if len(history[i].ToolCalls) > 0 {
-			return "" // it called a tool properly — the prose tag is incidental
+			return "" // it called a tool properly; the prose tag is incidental
 		}
 		if strings.Contains(history[i].Content, "<tool_call>") {
-			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running — your model server isn't parsing tool calls. Enable its OpenAI tool-call parser server-side (e.g. vLLM `--tool-call-parser`, llama.cpp `--jinja`).")
+			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running - your model server isn't parsing tool calls. Enable its OpenAI tool-call parser server-side (e.g. vLLM `--tool-call-parser`, llama.cpp `--jinja`).")
 		}
 		return "" // newest assistant message is clean
 	}
@@ -975,7 +975,7 @@ func toolCallLeakWarning(history []chmctx.Message) string {
 }
 
 // dispatchNextTool pops the next pending tool call and runs it. Every tool
-// flows through runToolCall — none are special-cased. lastToolKey records this
+// flows through runToolCall; none are special-cased. lastToolKey records this
 // call's target so the failure nudge can tell when the model keeps retrying the
 // same failing operation (see recordToolOutcome).
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
@@ -989,25 +989,25 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 }
 
 // nudgeOrigin prefixes every deterministic backstop note. A weak (30B) model
-// reads a bare mid-turn system message as an empty/absent user turn — "the user
-// hasn't given me a new task, I'll just stop" — the exact misread that turned the
+// reads a bare mid-turn system message as an empty/absent user turn ("the user
+// hasn't given me a new task, I'll just stop"), the exact misread that turned the
 // finish nudge net-negative on the galaxy run (it re-prompted an honest
 // `unverified` finish into a confident, caveat-free "it works"). Naming the note
 // as codehamr's own automated check, not the user's, keeps the model oriented.
-// Deliberately says nothing about whether to stop or keep going — each nudge body
-// owns that — so it can't induce the premature-completion failure the runaway /
+// Deliberately says nothing about whether to stop or keep going (each nudge body
+// owns that), so it can't induce the premature-completion failure the runaway /
 // verify wording fights.
-const nudgeOrigin = "[Automated codehamr check — not a message from your user.] "
+const nudgeOrigin = "[Automated codehamr check - not a message from your user.] "
 
 // maxToolFailStreak is how many consecutive same-target failures trigger the
 // nudge. Generous on purpose: a model iterating on a hard edit gets several
-// attempts before being told it's stuck — catches genuine loops without
+// attempts before being told it's stuck; catches genuine loops without
 // interrupting honest trial-and-error.
 const maxToolFailStreak = 5
 
 // toolTargetKey is the stable identity used to detect a repeated-failure loop:
 // tool name + its target (the path for file tools, the command's first line for
-// bash). Deliberately NOT the full argument set — a full-args key is defeated by
+// bash). Deliberately NOT the full argument set: a full-args key is defeated by
 // any cosmetic change between retries (a regenerated file body, a reworded
 // command). Keying on the target catches a model hammering the same operation
 // while leaving varied exploration alone.
@@ -1086,7 +1086,7 @@ func (m *Model) maybeFailureNudge() {
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
 		Content: nudgeOrigin + fmt.Sprintf(
-			"The last %d tool calls to the same target failed the same way. Stop repeating it — read the error, change your approach, or tell the user what's blocking you.",
+			"The last %d tool calls to the same target failed the same way. Stop repeating it - read the error, change your approach, or tell the user what's blocking you.",
 			m.failStreak),
 	})
 	m.failKey, m.failStreak = "", 0
@@ -1094,7 +1094,7 @@ func (m *Model) maybeFailureNudge() {
 
 // maxToolRounds caps tool calls per turn before the runaway self-check fires.
 // Above an honest large build (the galaxy runs that finished cleanly ran ~60),
-// below a genuine runaway — so a doomed loop the same-target failure streak
+// below a genuine runaway, so a doomed loop the same-target failure streak
 // can't see (a blocked install or lib-hunt re-fired with cosmetic variations)
 // still gets a self-check with budget left, not after it has burned the turn.
 const maxToolRounds = 75
@@ -1103,8 +1103,8 @@ const maxToolRounds = 75
 // maxToolRounds tool calls without finishing. The runawayNudged latch fires it
 // exactly once per turn: this is consulted only when the pending queue drains,
 // but toolRounds increments per call, so a multi-tool-call round can jump the
-// counter past maxToolRounds between checks — a bare equality test would skip
-// the threshold and never fire. Framed as a self-check, not a stop order —
+// counter past maxToolRounds between checks: a bare equality test would skip
+// the threshold and never fire. Framed as a self-check, not a stop order:
 // telling a 30B to "stop" mid-task is the premature-completion failure we
 // otherwise fight, so the model decides whether it is still converging.
 func (m *Model) maybeRunawayNudge() {
@@ -1116,7 +1116,7 @@ func (m *Model) maybeRunawayNudge() {
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
 		Content: nudgeOrigin + fmt.Sprintf(
-			"%d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here — a blocked install, a missing tool, a path failing the same way — stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
+			"%d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
 			m.toolRounds),
 	})
 }
@@ -1133,8 +1133,8 @@ const verifyNudgeMinRounds = 8
 // (>= verifyNudgeMinRounds tool calls) is about to finish with a clean, non-empty
 // reply, then latches so it fires at most once per turn. Returns true when it
 // nudged, so the caller re-prompts and the model can verify before its final
-// summary. The false-green finish — a confident summary for an artifact that was
-// never actually run — is invisible to the other three backstops, which only see
+// summary. The false-green finish (a confident summary for an artifact that was
+// never actually run) is invisible to the other three backstops, which only see
 // repeated failures, runaway counts, or an empty reply. Framed as re-grounding +
 // honest verification, never a stop order: telling a 30B to "stop" mid-task is the
 // premature-completion failure we otherwise fight.
@@ -1142,7 +1142,7 @@ func (m *Model) maybeVerifyNudge() bool {
 	if m.verifyNudged || m.toolRounds < verifyNudgeMinRounds {
 		return false
 	}
-	// The nudge targets the false-green finish — a confident summary for work that
+	// The nudge targets the false-green finish: a confident summary for work that
 	// was never run. A finish that already marks something `unverified` has done
 	// exactly the honest self-assessment the nudge would ask for; it is the
 	// OPPOSITE of a false green. Re-prompting it is a wasted round at best, and on
@@ -1157,7 +1157,7 @@ func (m *Model) maybeVerifyNudge() bool {
 	dbgWritef("nudge", "finish re-grounding nudge injected at %d tool calls this turn", m.toolRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role:    chmctx.RoleSystem,
-		Content: nudgeOrigin + "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it — build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed — then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> — <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
+		Content: nudgeOrigin + "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it - build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed - then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> - <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
 	})
 	return true
 }

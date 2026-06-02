@@ -9,7 +9,7 @@ import (
 )
 
 // TestPromptHistoryRoundTrip: values with newlines/quotes/unicode survive a
-// disk round-trip in append order — the on-disk format must carry any byte the
+// disk round-trip in append order, the on-disk format must carry any byte the
 // textarea can submit.
 func TestPromptHistoryRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -34,7 +34,7 @@ func TestPromptHistoryRoundTrip(t *testing.T) {
 }
 
 // TestPromptHistoryCap: exceeding historyMaxEntries drops the oldest, not the
-// newest — otherwise the file grows unbounded.
+// newest, otherwise the file grows unbounded.
 func TestPromptHistoryCap(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < historyMaxEntries+50; i++ {
@@ -153,7 +153,7 @@ func TestPromptHistoryConcurrentAppendsKeepBoth(t *testing.T) {
 func TestPromptHistoryQuotedLineStaysLoadable(t *testing.T) {
 	dir := t.TempDir()
 	// Clears the unquoted gate (len == cap) but quotes to ~4× the cap, past the
-	// scanner ceiling — pre-fix this reached disk.
+	// scanner ceiling. Pre-fix this reached disk.
 	pathological := strings.Repeat("\x01", historyMaxEntryBytes)
 	if err := appendPromptHistory(dir, pathological); err != nil {
 		t.Fatal(err)
@@ -169,10 +169,10 @@ func TestPromptHistoryQuotedLineStaysLoadable(t *testing.T) {
 			return // invariant held: later entries stay loadable
 		}
 	}
-	t.Fatalf("a later entry was lost — an oversized quoted line halted the load scan; got %d entries", len(got))
+	t.Fatalf("a later entry was lost - an oversized quoted line halted the load scan; got %d entries", len(got))
 }
 
-// TestPromptHistoryRejectsHugeEntry: a multi-MiB paste isn't stored — the load
+// TestPromptHistoryRejectsHugeEntry: a multi-MiB paste isn't stored, the load
 // scanner would silently drop it anyway, so declining to write is consistent.
 // Anything sane (a code paragraph, a stack trace) still survives.
 func TestPromptHistoryRejectsHugeEntry(t *testing.T) {

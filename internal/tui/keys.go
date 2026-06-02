@@ -12,7 +12,7 @@ import (
 const quitArmText = "press Ctrl+C again to quit"
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Any key that isn't Ctrl+C clears a pending quit arm — no stray quits.
+	// Any key that isn't Ctrl+C clears a pending quit arm: no stray quits.
 	if msg.Type != tea.KeyCtrlC && !m.quitArmedAt.IsZero() {
 		m.quitArmedAt = time.Time{}
 		if m.status == quitArmText {
@@ -24,7 +24,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCtrlC()
 	case tea.KeyCtrlL:
 		// Clear the typed prompt and force a full redraw. Scrollback and
-		// history stay — Ctrl+L tidies input, /clear starts over.
+		// history stay; Ctrl+L tidies input, /clear starts over.
 		m.ta.Reset()
 		return m, tea.ClearScreen
 	case tea.KeyCtrlD:

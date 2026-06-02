@@ -26,7 +26,7 @@ func TestBashNonZeroExitNotFatal(t *testing.T) {
 
 // TestBashExactExitMarkerFormat pins the exact non-zero-exit shape: output,
 // then a single "\n(exit: ...)" marker. The model parses these, and the other
-// tests only Contains("exit") — a dropped "\n" or doubled marker would pass
+// tests only Contains("exit"); a dropped "\n" or doubled marker would pass
 // silently. Also proves real output survives alongside the exit (the `false`
 // test emits nothing).
 func TestBashExactExitMarkerFormat(t *testing.T) {
@@ -44,7 +44,7 @@ func TestBashEmptyCommand(t *testing.T) {
 }
 
 // TestBashHonorsAlreadyCancelledParent: a pre-cancelled parent (Ctrl+C raced
-// the dispatch) must report "(cancelled)", not "(empty command)" or — worse —
+// the dispatch) must report "(cancelled)", not "(empty command)" or, worse,
 // spawn a fresh /bin/sh. The cancel must win even on the empty-cmd fast path.
 func TestBashHonorsAlreadyCancelledParent(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
@@ -85,7 +85,7 @@ func TestBashCustomTimeoutHonored(t *testing.T) {
 
 func TestBashTimeoutCappedAtOneHour(t *testing.T) {
 	// 999999s must clamp to 3600. Can't sleep an hour to prove it, so a short
-	// command just has to complete quickly — no overflow, no panic.
+	// command just has to complete quickly: no overflow, no panic.
 	call := chmctx.ToolCall{
 		ID: "t2", Name: "bash",
 		Arguments: map[string]any{
@@ -101,7 +101,7 @@ func TestBashTimeoutCappedAtOneHour(t *testing.T) {
 
 // TestBashTimeoutOverflowClamped: extreme floats must be clamped BEFORE the
 // Duration multiply. `time.Duration(1e18) * time.Second` overflows int64 to a
-// negative deadline, firing context.WithTimeout instantly — the command would
+// negative deadline, firing context.WithTimeout instantly: the command would
 // "succeed" without running. Clamp up front to avoid it.
 func TestBashTimeoutOverflowClamped(t *testing.T) {
 	call := chmctx.ToolCall{
@@ -119,7 +119,7 @@ func TestBashTimeoutOverflowClamped(t *testing.T) {
 
 // TestBashParentCancelMidRun: parent cancel mid-sleep returns "(cancelled)",
 // not a misleading "(timeout after Xs)" or stale exit code. Parent cancel
-// always wins over timeout — it's the user's signal.
+// always wins over timeout: it's the user's signal.
 func TestBashParentCancelMidRun(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -142,7 +142,7 @@ func TestBashParentCancelMidRun(t *testing.T) {
 
 func TestBashBackgroundedChildDoesNotBlock(t *testing.T) {
 	// A naked `cmd &` leaves the child holding stdout/stderr pipes. We must not
-	// block on them after /bin/sh exits — that caused multi-minute stalls
+	// block on them after /bin/sh exits, which caused multi-minute stalls
 	// before WaitDelay was set.
 	start := time.Now()
 	Bash(context.Background(), "sleep 3 &", 5*time.Second)
@@ -220,7 +220,7 @@ func TestInlineStatusRuneBoundaryTruncate(t *testing.T) {
 
 // TestRunRawSurfacesTruncatedToolArgs: the _parse_error sentinel (set by
 // llm.resolve when the server truncates an oversized tool call mid-JSON) must
-// surface as an actionable message naming the cause + chunked recovery — not
+// surface as an actionable message naming the cause + chunked recovery, not
 // fall through the type assertions to a misleading "(empty path)" / "(empty
 // command)". Checked for a file tool and bash to pin that the guard is generic,
 // sitting before the per-tool switch.

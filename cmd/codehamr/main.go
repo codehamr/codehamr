@@ -53,7 +53,7 @@ func main() {
 	cwd := mustCwd()
 	// created is ignored: any first-run notice printed here is wiped milliseconds
 	// later by the unconditional screen+scrollback clear below, before the TUI
-	// draws — so there's nothing to announce.
+	// draws, so there's nothing to announce.
 	cfg, _, err := config.Bootstrap(cwd)
 	if err != nil {
 		log.Fatalf("codehamr: %v", err)
@@ -74,7 +74,7 @@ func main() {
 	m := tui.New(cfg, client, abs, version)
 
 	// Hard clear before the TUI takes over: \x1b[2J viewport, \x1b[3J
-	// scrollback, \x1b[H cursor home — a clean canvas free of prior shell
+	// scrollback, \x1b[H cursor home, a clean canvas free of prior shell
 	// history. Inline-mode safe: the session's own scrollback still
 	// accumulates via tea.Println.
 	os.Stdout.WriteString("\x1b[2J\x1b[3J\x1b[H")
@@ -95,7 +95,7 @@ func main() {
 
 func printHelp() {
 	fmt.Println(strings.TrimSpace(`
-codehamr — a lightweight, fast coding agent for the terminal.
+codehamr, a lightweight, fast coding agent for the terminal.
 
 Usage:
   codehamr             start interactive TUI
@@ -110,7 +110,7 @@ Keys (inside TUI):
   ctrl+d   quit (on empty input)
 
 Config:
-  .codehamr/config.yaml — per-project settings
+  .codehamr/config.yaml   per-project settings
 
 Env:
   CODEHAMR_URL         override the active profile's url at runtime`))
@@ -160,7 +160,7 @@ func maybeSelfUpdate() {
 	//
 	// os.Setenv overwrites in place so os.Environ() carries exactly one entry;
 	// append(os.Environ(), …) would leave a pre-existing user-set value first,
-	// and Unix execve resolves os.Getenv to the FIRST match — silently defeating
+	// and Unix execve resolves os.Getenv to the FIRST match, silently defeating
 	// the guard if someone exported CODEHAMR_NO_UPDATE_CHECK to a non-"1" value.
 	os.Setenv("CODEHAMR_NO_UPDATE_CHECK", "1")
 	if err := reExec(exe, os.Args, os.Environ()); err != nil {
@@ -168,7 +168,7 @@ func maybeSelfUpdate() {
 	}
 }
 
-// mustCwd returns the working directory or exits 1 — called only where
+// mustCwd returns the working directory or exits 1, called only where
 // there's nothing sensible to recover to.
 func mustCwd() string {
 	cwd, err := os.Getwd()

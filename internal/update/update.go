@@ -8,10 +8,11 @@
 // the caller's syscall.Exec re-enters the new version in place. The TUI carries
 // no update awareness.
 //
-// Any failure — network hiccup, offline, missing asset, parse glitch — returns
-// "no update" rather than an error: a startup banner that shouts on flaky
-// internet is worse than one that stays quiet. CODEHAMR_NO_UPDATE_CHECK=1 is the
-// escape hatch for air-gapped setups, CI, and the post-update re-exec (which
+// Any failure, whether a network hiccup, offline, missing asset, or parse
+// glitch, returns "no update" rather than an error: a startup banner that
+// shouts on flaky internet is worse than one that stays quiet.
+// CODEHAMR_NO_UPDATE_CHECK=1 is the escape hatch for air-gapped setups, CI,
+// and the post-update re-exec (which
 // sets it so the child doesn't loop into a second check).
 package update
 
@@ -31,7 +32,7 @@ import (
 )
 
 // checksumsURL is the "latest" redirect for the goreleaser checksums asset.
-// Direct CDN download — no GitHub API call, so no rate limit even for users
+// Direct CDN download, no GitHub API call, so no rate limit even for users
 // who start many sessions. var not const so tests can point it at an httptest
 // server; production never reassigns it.
 var checksumsURL = "https://github.com/codehamr/codehamr/releases/latest/download/codehamr_checksums.txt"
@@ -51,7 +52,7 @@ var promoteRename = os.Rename
 
 // Check reports whether the local binary's sha256 differs from the remote
 // asset's recorded hash. ctx propagates a startup Ctrl+C into the HTTP request.
-// Returns false on any failure — see package doc.
+// Returns false on any failure; see package doc.
 func Check(ctx context.Context, execPath string) bool {
 	if os.Getenv("CODEHAMR_NO_UPDATE_CHECK") == "1" {
 		return false
@@ -72,7 +73,7 @@ func Check(ctx context.Context, execPath string) bool {
 }
 
 // assetName mirrors the name_template in .goreleaser.yaml. Every goos goreleaser
-// builds for must have a case here — a missing one silently locks that
+// builds for must have a case here; a missing one silently locks that
 // platform's users out of auto-updates (the Windows regression);
 // TestAssetNameCoversEveryReleasedPlatform pins the contract.
 //
@@ -194,7 +195,7 @@ func Apply(ctx context.Context, execPath string) error {
 		return err
 	}
 	if err := promoteRename(tmpPath, execPath); err != nil {
-		// Promote failed after the running binary was moved aside — restore it
+		// Promote failed after the running binary was moved aside; restore it
 		// so the caller still has something to exec. If restore ALSO fails,
 		// execPath is empty: the one outcome worth shouting about, so surface
 		// both errors.
@@ -209,7 +210,7 @@ func Apply(ctx context.Context, execPath string) error {
 // CleanupOld removes the execPath+".old" left by a previous Apply. Run at the
 // start of the next launch: on Windows the .old is locked for the prior
 // process's lifetime, so unlink-at-Apply-time fails but unlink-at-next-launch
-// wins. Failure is silent — a leftover .old wastes disk but never breaks the
+// wins. Failure is silent: a leftover .old wastes disk but never breaks the
 // session.
 func CleanupOld(execPath string) {
 	_ = os.Remove(execPath + ".old")

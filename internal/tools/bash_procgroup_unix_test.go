@@ -34,7 +34,7 @@ func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 	// Wait for the PID file to materialise (the child has started).
 	pid := waitForPID(t, pidFile)
 
-	// Sanity: child alive before cancel — signal 0 just probes.
+	// Sanity: child alive before cancel; signal 0 just probes.
 	if err := syscall.Kill(pid, 0); err != nil {
 		t.Fatalf("backgrounded child %d should be alive before cancel: %v", pid, err)
 	}
@@ -47,19 +47,19 @@ func TestBashKillsBackgroundedChildOnCancel(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("Bash did not return within 10s after cancel — group kill failed")
+		t.Fatal("Bash did not return within 10s after cancel - group kill failed")
 	}
 
-	// Poll until the child is gone — the kernel may take a beat to tear the
+	// Poll until the child is gone; the kernel may take a beat to tear the
 	// group down.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
-			return // child is gone — the group kill worked
+			return // child is gone, the group kill worked
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("backgrounded child %d survived parent cancel — process group was not killed", pid)
+	t.Fatalf("backgrounded child %d survived parent cancel - process group was not killed", pid)
 }
 
 // waitForPID blocks until pidFile contains a parseable PID, then returns it.

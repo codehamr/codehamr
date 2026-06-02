@@ -2,7 +2,7 @@
 // Client-side plumbing only; the server owns all accounting.
 //
 // Wire contract: one budget-fraction header (0.0..1.0), one context-window
-// header, plus standard 401/402. A hamrpass is a prepaid pot of budget — no
+// header, plus standard 401/402. A hamrpass is a prepaid pot of budget, no
 // cooldowns, rate limits, resets, or expiry.
 package cloud
 
@@ -22,7 +22,7 @@ import (
 //
 // /v1/models is the route-registered OpenAI heartbeat every keyless backend
 // serves (Ollama, vLLM, lmstudio, llama.cpp). A root GET / hangs on vLLM,
-// which has no root route and blocks behind the inference loop — probe must
+// which has no root route and blocks behind the inference loop. The probe must
 // hit a real route to return promptly.
 //
 // Drain the body before close so the TCP connection returns to the pool;

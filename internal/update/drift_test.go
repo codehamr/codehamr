@@ -51,7 +51,7 @@ func goreleaserMatrix(t *testing.T) map[platformKey]bool {
 		}
 	}
 	if len(m) == 0 {
-		t.Fatalf("%s yielded an empty build matrix — parsing broke", goreleaserPath)
+		t.Fatalf("%s yielded an empty build matrix - parsing broke", goreleaserPath)
 	}
 	return m
 }
@@ -79,7 +79,7 @@ func assetNameSupported(matrix map[platformKey]bool) map[platformKey]string {
 }
 
 // TestAssetNameMatchesGoreleaserMatrix asserts the set of platforms assetName
-// resolves is EXACTLY the set goreleaser builds — no more, no less. Derived
+// resolves is EXACTLY the set goreleaser builds: no more, no less. Derived
 // from .goreleaser.yaml, not from a hardcoded mirror, so a future matrix edit
 // that outpaces assetName fails here loudly instead of after a real release.
 func TestAssetNameMatchesGoreleaserMatrix(t *testing.T) {
@@ -88,12 +88,12 @@ func TestAssetNameMatchesGoreleaserMatrix(t *testing.T) {
 
 	for k := range matrix {
 		if _, ok := supported[k]; !ok {
-			t.Errorf("%s/%s: goreleaser builds it but assetName returns ok=false — those users would silently never auto-update; add a case to assetName", k.os, k.arch)
+			t.Errorf("%s/%s: goreleaser builds it but assetName returns ok=false - those users would silently never auto-update; add a case to assetName", k.os, k.arch)
 		}
 	}
 	for k := range supported {
 		if !matrix[k] {
-			t.Errorf("%s/%s: assetName resolves it but goreleaser doesn't build it — Apply would 404; remove it from assetName or add it to .goreleaser.yaml", k.os, k.arch)
+			t.Errorf("%s/%s: assetName resolves it but goreleaser doesn't build it - Apply would 404; remove it from assetName or add it to .goreleaser.yaml", k.os, k.arch)
 		}
 	}
 }
@@ -103,7 +103,7 @@ func TestAssetNameMatchesGoreleaserMatrix(t *testing.T) {
 // a release build) and it asserts the published asset names are EXACTLY the set
 // assetName produces. This is the only check that exercises real goreleaser
 // output, so it catches a name_template edit, an archive-format switch
-// (binary -> zip/tar.gz), or the implicit windows ".exe" append changing — none
+// (binary -> zip/tar.gz), or the implicit windows ".exe" append changing, none
 // of which the hermetic test above can see. Skips when the env var is unset, so
 // the default `go test ./...` never needs goreleaser or the network.
 func TestPublishedManifestMatchesAssetName(t *testing.T) {
@@ -139,12 +139,12 @@ func TestPublishedManifestMatchesAssetName(t *testing.T) {
 	}
 	for name := range want {
 		if !published[name] {
-			t.Errorf("assetName produces %q but it is NOT in the published manifest — that platform's auto-update would 404 / find no checksum row", name)
+			t.Errorf("assetName produces %q but it is NOT in the published manifest - that platform's auto-update would 404 / find no checksum row", name)
 		}
 	}
 	for name := range published {
 		if !want[name] {
-			t.Errorf("published manifest lists %q which assetName never produces — a stale/renamed asset auto-update can't reach", name)
+			t.Errorf("published manifest lists %q which assetName never produces - a stale/renamed asset auto-update can't reach", name)
 		}
 	}
 }

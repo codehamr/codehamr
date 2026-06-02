@@ -9,7 +9,7 @@ import (
 )
 
 // TestModelBracketedPasteCreatesChip checks a bracketed-paste KeyMsg through
-// Model.Update reaches promptInput.Update and yields a chip — guarding against
+// Model.Update reaches promptInput.Update and yields a chip, guarding against
 // an earlier handleKey branch swallowing the paste.
 func TestModelBracketedPasteCreatesChip(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})

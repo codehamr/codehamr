@@ -1,6 +1,6 @@
 // Package config owns the .codehamr/ directory: config.yaml plus the
-// embedded default system prompt. The prompt lives only in the binary —
-// never on disk — so it's untamperable and every release ships it consistent.
+// embedded default system prompt. The prompt lives only in the binary,
+// never on disk, so it's untamperable and every release ships it consistent.
 package config
 
 import (
@@ -24,7 +24,7 @@ const DirName = ".codehamr"
 // defaultContextSize is the local profile's packing budget and the floor
 // Bootstrap coerces a bogus/missing context_size to. It must match what a stock
 // local server actually honors, NOT the model's theoretical max: Ollama's /v1
-// shim reports no X-Context-Window, so codehamr packs to this value blind — set
+// shim reports no X-Context-Window, so codehamr packs to this value blind: set
 // it too high and the server silently front-truncates the prompt, dropping the
 // embedded system prompt and early tool results with no error. 32k is the safe
 // stock-Ollama tier and the seeded local model's native window. Users who raise
@@ -47,9 +47,9 @@ func IsCloudProfile(name string) bool {
 }
 
 // managedProfiles are seeded on first run: a local Ollama target and the
-// hosted hamrpass endpoint (empty key — /hamrpass pastes it, re-creating the
-// entry from this seed if the user deleted it). After first run config.yaml is
-// the user's — deletions and renames stick, Bootstrap never re-adds anything.
+// hosted hamrpass endpoint (empty key, since /hamrpass pastes it, re-creating
+// the entry from this seed if the user deleted it). After first run config.yaml
+// is the user's: deletions and renames stick, Bootstrap never re-adds anything.
 // hamrpass keeps ContextSize=0 so omitempty drops it from disk: users can't
 // tune what the server already manages.
 var managedProfiles = map[string]Profile{
@@ -121,7 +121,7 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	switch {
 	case err == nil:
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, false, fmt.Errorf("%s: refuses to follow symlink — remove or replace with a real directory", dir)
+			return nil, false, fmt.Errorf("%s: refuses to follow symlink, remove or replace with a real directory", dir)
 		}
 		if !info.IsDir() {
 			return nil, false, fmt.Errorf("%s: exists but is not a directory", dir)
@@ -143,11 +143,11 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	// could redirect the read (which config we honour) or the write (clobbering
 	// an arbitrary user-writable file with the seed). Refuse with a clear error.
 	if li, err := os.Lstat(cfgPath); err == nil && li.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("%s: refuses to follow symlink — remove or replace with a real file", cfgPath)
+		return nil, false, fmt.Errorf("%s: refuses to follow symlink, remove or replace with a real file", cfgPath)
 	}
 	var cfg *Config
 	if b, err := os.ReadFile(cfgPath); err == nil {
-		cfg = &Config{} // do NOT merge Default here — strict means strict
+		cfg = &Config{} // do NOT merge Default here; strict means strict
 		dec := yaml.NewDecoder(bytes.NewReader(b))
 		dec.KnownFields(true)
 		if err := dec.Decode(cfg); err != nil {
@@ -167,7 +167,7 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	// the ContextSize deref below. Reject up front for a readable error.
 	for name, p := range cfg.Models {
 		if p == nil {
-			return nil, false, fmt.Errorf("config.yaml: profile %q is empty — remove it or fill in the required fields", name)
+			return nil, false, fmt.Errorf("config.yaml: profile %q is empty; remove it or fill in the required fields", name)
 		}
 	}
 	// Coerce missing/zero/negative context_size to the default. The packer
@@ -185,12 +185,12 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 		}
 	}
 	// Coerce a dangling Active to the first profile in sorted order
-	// (deterministic). With no profiles at all, fail loud — runtime would
+	// (deterministic). With no profiles at all, fail loud, since runtime would
 	// otherwise nil-deref on the first dial-out.
 	if _, ok := cfg.Models[cfg.Active]; !ok {
 		names := cfg.ModelNames()
 		if len(names) == 0 {
-			return nil, false, errors.New("config.yaml: no profiles configured — add one under `models:` or delete .codehamr/config.yaml to reseed defaults")
+			return nil, false, errors.New("config.yaml: no profiles configured; add one under `models:` or delete .codehamr/config.yaml to reseed defaults")
 		}
 		cfg.Active = names[0]
 	}
@@ -226,7 +226,7 @@ func writeYAML(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	// Re-prepended every Save since yaml.Marshal drops free-form comments — the
+	// Re-prepended every Save since yaml.Marshal drops free-form comments, the
 	// only place a hint survives. The sandbox line catches the top first-run
 	// footgun: in a devcontainer/WSL2 with Ollama on the host, `localhost`
 	// doesn't reach the host and yields a baffling "connection refused". Native
@@ -236,7 +236,7 @@ func writeYAML(path string, v any) error {
 # Running codehamr in a devcontainer / WSL2 with Ollama on the host:
 # swap 'http://localhost:11434' with 'http://host.docker.internal:11434' below.
 #
-# context_size is what codehamr packs to — set it to your server's ACTUAL window,
+# context_size is what codehamr packs to - set it to your server's ACTUAL window,
 # not the model's theoretical max. For Ollama that's OLLAMA_CONTEXT_LENGTH (or a
 # Modelfile 'PARAMETER num_ctx'); too high and the server silently drops the
 # oldest messages. More VRAM lets you raise both together.
@@ -244,7 +244,7 @@ func writeYAML(path string, v any) error {
 `)
 	// Write to a sibling temp then rename over config.yaml. Rename is atomic
 	// within the directory, so a crash, signal, or full disk mid-write can never
-	// leave a truncated config.yaml — which Bootstrap's strict decode would fatal
+	// leave a truncated config.yaml, which Bootstrap's strict decode would fatal
 	// on, bricking the next launch until the file is hand-deleted. Mirrors
 	// internal/update's promote-by-rename. os.CreateTemp makes the temp 0o600 and
 	// rename installs that fresh inode in place, so this also closes the
@@ -289,8 +289,8 @@ func (c *Config) ModelNames() []string {
 	return slices.Sorted(maps.Keys(c.Models))
 }
 
-// SetActive switches the active profile and persists. Fails on an unknown name
-// — no silent coercion. On Save failure it reverts in-memory Active so the live
+// SetActive switches the active profile and persists. Fails on an unknown name,
+// no silent coercion. On Save failure it reverts in-memory Active so the live
 // model and config.yaml stay in lockstep; otherwise the switch would stick this
 // session but vanish on the next Bootstrap.
 func (c *Config) SetActive(name string) error {

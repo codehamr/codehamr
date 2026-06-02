@@ -1,4 +1,4 @@
-# Procedural Galaxy Explorer — One-Shot Benchmark
+# Procedural Galaxy Explorer: One-Shot Benchmark
 
 Build a single self-contained `galaxy.html` that opens in a modern browser and renders an explorable procedural galaxy in WebGL. The player flies first-person through an effectively infinite universe of stars, planets, moons, rings, asteroid belts, nebulae, and a black hole. Bias every choice toward cinematic and atmospheric: the player feels small, the universe feels vast.
 
@@ -21,4 +21,4 @@ Build a single self-contained `galaxy.html` that opens in a modern browser and r
 ## Done when
 It opens with no console errors, the intro shows a ringed planet, flying reveals an endless and varied universe, and shooting things produces convincing explosions with synthesized audio.
 
-Deliver the complete `galaxy.html` and nothing else — no commentary, no markdown fences.
+Deliver the complete `galaxy.html` and nothing else: no commentary, no markdown fences.

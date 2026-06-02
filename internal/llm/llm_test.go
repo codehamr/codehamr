@@ -147,7 +147,7 @@ func TestChatToolCallFragmentedArgs(t *testing.T) {
 		t.Fatalf("tool call missing: %+v", got)
 	}
 	if cmd, _ := got.Arguments["cmd"].(string); cmd != "ls" {
-		t.Fatalf("fragmented args not reassembled — wanted cmd=ls, got %+v", got.Arguments)
+		t.Fatalf("fragmented args not reassembled - wanted cmd=ls, got %+v", got.Arguments)
 	}
 	if len(got.Arguments) != 1 {
 		t.Fatalf("expected exactly one parsed arg, got %+v", got.Arguments)
@@ -155,7 +155,7 @@ func TestChatToolCallFragmentedArgs(t *testing.T) {
 }
 
 // TestChatToolArgsStreamLive: each tool-call arguments fragment is forwarded as
-// an EventToolArgs as it arrives — so the UI can tick its live token estimate
+// an EventToolArgs as it arrives, so the UI can tick its live token estimate
 // while a file streams into write_file, not just once at stream end. Fragments
 // concatenate to the full arguments and all precede the resolved EventToolCall.
 func TestChatToolArgsStreamLive(t *testing.T) {
@@ -318,7 +318,7 @@ func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 }
 
 // TestToWireAlwaysSendsContent: silent tool results (empty stdout) must still
-// serialize "content":"" — Ollama's /v1 shim 400s if the field is absent or null.
+// serialize "content":"". Ollama's /v1 shim 400s if the field is absent or null.
 func TestToWireAlwaysSendsContent(t *testing.T) {
 	msgs := []chmctx.Message{
 		{Role: chmctx.RoleAssistant, Content: "", ToolCalls: []chmctx.ToolCall{
@@ -357,7 +357,7 @@ func TestChatSendsStreamIncludeUsage(t *testing.T) {
 }
 
 // TestChatReadsUsageTokens: tokens come from `usage.completion_tokens`, not
-// content length — we trust what the backend reports.
+// content length; we trust what the backend reports.
 func TestChatReadsUsageTokens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
@@ -400,7 +400,7 @@ func TestSendEventUnblocksOnCancel(t *testing.T) {
 			t.Fatal("sendEvent returned true for a send nobody drained; it must report false after cancel")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("sendEvent wedged on an undrained channel after cancel — the anti-wedge <-parent.Done() arm is missing")
+		t.Fatal("sendEvent wedged on an undrained channel after cancel - the anti-wedge <-parent.Done() arm is missing")
 	}
 }
 
@@ -421,7 +421,7 @@ func TestChat401(t *testing.T) {
 // of returning it to the keep-alive pool. With the same client issuing two
 // sequential 401s, a drained body reuses one connection (one RemoteAddr); an
 // undrained one forces a fresh connection on the second request (two). The 402
-// and default error branches already drain — this pins the 401 branch to match.
+// and default error branches already drain; this pins the 401 branch to match.
 func TestChat401DrainsBodyForConnReuse(t *testing.T) {
 	var mu sync.Mutex
 	conns := map[string]bool{}
@@ -553,7 +553,7 @@ func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 // TestReasoningChunksAreEmitted: reasoning models stream chain-of-thought in
 // `delta.reasoning`. The decoder must surface these as EventReasoning (else the
 // UI freezes for the whole reasoning phase) and must NOT fold them into the
-// assistant content — reasoning has no business in history.
+// assistant content: reasoning has no business in history.
 func TestReasoningChunksAreEmitted(t *testing.T) {
 	chunks := []string{
 		`{"choices":[{"delta":{"reasoning":"Hmm"},"finish_reason":null}]}`,
@@ -595,7 +595,7 @@ func TestReasoningChunksAreEmitted(t *testing.T) {
 
 // TestChatFallsBackWhenReasoningEffortRejected: newer OpenAI models reject tools +
 // reasoning_effort on /v1/chat/completions with a 400. postChat must drop the
-// field, retry once, and stay sticky for the Client's life — else every turn
+// field, retry once, and stay sticky for the Client's life, else every turn
 // burns a 400.
 func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 	var bodies []string
@@ -691,7 +691,7 @@ func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
 }
 
 // TestChatFallsBackWhenOllamaRejectsThinking: Ollama rejects reasoning_effort on
-// non-thinking models with a 400 saying `<model> does not support thinking` —
+// non-thinking models with a 400 saying `<model> does not support thinking`:
 // different shape from OpenAI's message, same remedy. postChat must drop the
 // field, retry once, and stay sticky so we don't re-trip the 400 every turn.
 func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
@@ -745,7 +745,7 @@ func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 
 // TestChatDoesNotFallBackOnUnrelatedThinking: a 400 that is NOT about reasoning
 // but happens to contain both "not support" and the word "thinking" must not
-// trip the reasoning_effort fallback — otherwise the bare-"thinking" match
+// trip the reasoning_effort fallback. Otherwise the bare-"thinking" match
 // burns a wasted retry and latches reasoning off for the Client's whole life on
 // an error that had nothing to do with reasoning. The retry would resend the
 // same (still-failing) request, so we'd see a second request and a sticky flag.
@@ -763,7 +763,7 @@ func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
 
 	c := New(srv.URL, "some-model", "")
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		_ = e // the turn errors (the 400 is real) — that's expected
+		_ = e // the turn errors (the 400 is real), that's expected
 	}
 	if len(bodies) != 1 {
 		t.Fatalf("unrelated 400 must NOT trigger a fallback retry; got %d requests", len(bodies))
@@ -788,7 +788,7 @@ func TestNewHasNoHTTPTimeout(t *testing.T) {
 // TestChatIdleTimeoutAbortsStalledStream reproduces the exact hang: the server
 // returns 200 OK then sends nothing. Without the idle watchdog scanner.Scan()
 // blocks forever; with it, the body is closed and the turn ends in an EventError
-// naming the stall — a finite escape that doesn't need Ctrl+C.
+// naming the stall, a finite escape that doesn't need Ctrl+C.
 func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -815,7 +815,7 @@ func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 		t.Fatalf("error should name the stall: %v", gotErr)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("watchdog fired too late (%v) — should be ~IdleTimeout", elapsed)
+		t.Fatalf("watchdog fired too late (%v) - should be ~IdleTimeout", elapsed)
 	}
 }
 
@@ -859,7 +859,7 @@ func TestChatIdleWatchdogResetByFrames(t *testing.T) {
 
 // TestToWireParseErrorArgsStayValidJSON: when resolve() stamps _parse_error for a
 // truncated tool call and that assistant message round-trips into the next
-// request, toWire must still emit VALID JSON for arguments — otherwise every
+// request, toWire must still emit VALID JSON for arguments. Otherwise every
 // later turn re-sends corrupt JSON and the backend 400s forever (session
 // poisoning). The protection is re-marshalling the parsed map, never raw bytes.
 func TestToWireParseErrorArgsStayValidJSON(t *testing.T) {

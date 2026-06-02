@@ -40,7 +40,7 @@ func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 }
 
 // TestFirstResizeDoesNotClearScreen: the first WindowSizeMsg must not
-// ClearScreen — the terminal still holds the user's pre-launch shell
+// ClearScreen; the terminal still holds the user's pre-launch shell
 // output; wiping it would feel destructive. Only the splash is printed.
 func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
@@ -69,7 +69,7 @@ func TestWidthChangeSuppressesView(t *testing.T) {
 	mx.phase = phaseStreaming
 	mm = mx
 
-	for _, next := range []int{60, 100} { // narrow then widen — both must suppress
+	for _, next := range []int{60, 100} { // narrow then widen, both must suppress
 		mm2, cmd := mm.Update(tea.WindowSizeMsg{Width: next, Height: 24})
 		nm := mm2.(Model)
 
@@ -91,7 +91,7 @@ func TestWidthChangeSuppressesView(t *testing.T) {
 
 // TestResizeSettleReplaysScrollbackAtNewWidth: a matching settle returns a
 // tea.Sequence that wipes viewport + scrollback and re-emits splash and the
-// full m.scroll transcript at the new width — so no previous-width rows
+// full m.scroll transcript at the new width, so no previous-width rows
 // soft-wrap into stair-steps.
 func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
@@ -123,7 +123,7 @@ func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 		t.Error("settle must include eraseScrollback (\\x1b[3J)")
 	}
 	if !cmdYieldsPrintln(settle) {
-		t.Error("settle must include at least one tea.Println — the splash and/or replayed scroll")
+		t.Error("settle must include at least one tea.Println - the splash and/or replayed scroll")
 	}
 	// Two Println leaves: splash + transcript replay (no outbox queued here).
 	if n := countPrintlnLeaves(settle); n != 2 {
@@ -161,7 +161,7 @@ func TestStaleResizeSettleIsDiscarded(t *testing.T) {
 }
 
 // TestRedundantResizeIsNoOp: a WindowSizeMsg with unchanged dimensions
-// (some terminals send these on focus) must not fire the hardening path —
+// (some terminals send these on focus) must not fire the hardening path;
 // clearing the screen for a non-event flickers for no benefit.
 func TestRedundantResizeIsNoOp(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
@@ -213,7 +213,7 @@ func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 
 // countCmdLeaves runs cmd, recurses into the slice-shaped []tea.Cmd payload
 // of tea.BatchMsg / tea.sequenceMsg (both unexported), and counts leaves
-// where match holds — asserting what a Sequence emits without importing
+// where match holds, asserting what a Sequence emits without importing
 // bubbletea's internal types.
 func countCmdLeaves(cmd tea.Cmd, match func(tea.Cmd, tea.Msg) bool) int {
 	if cmd == nil {
