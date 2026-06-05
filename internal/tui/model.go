@@ -168,6 +168,9 @@ type Model struct {
 	// prompt, not just its visible text.
 	promptHistory []promptEntry
 	histIdx       int
+	// histDraft stashes the unsent draft when ↑ first leaves the live line, so
+	// ↓ back to histIdx -1 restores it instead of clearing the user's typing.
+	histDraft promptEntry
 
 	// slash-autocomplete popover state. suggest holds command rows (when
 	// suggestArgLevel is false) or argument rows for activeCmd (when true):

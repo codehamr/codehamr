@@ -121,6 +121,10 @@ func (m Model) historyUp() Model {
 	if len(m.promptHistory) == 0 {
 		return m
 	}
+	// Leaving the live line: stash the unsent draft so ↓ can restore it.
+	if m.histIdx == -1 {
+		m.histDraft = m.ta.Entry()
+	}
 	if m.histIdx+1 < len(m.promptHistory) {
 		m.histIdx++
 	}
@@ -136,7 +140,7 @@ func (m Model) historyDown() Model {
 	}
 	m.histIdx--
 	if m.histIdx == -1 {
-		m.ta.Reset()
+		m.ta.Restore(m.histDraft)
 	} else {
 		m.ta.Restore(m.promptHistory[len(m.promptHistory)-1-m.histIdx])
 	}

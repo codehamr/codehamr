@@ -503,6 +503,24 @@ func TestHistoryUpDownReplayLastSubmission(t *testing.T) {
 	}
 }
 
+// TestHistoryDownRestoresUnsentDraft: an unsent draft survives a ↑ into history
+// and is restored when ↓ walks back to the live line.
+func TestHistoryDownRestoresUnsentDraft(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.promptHistory = []promptEntry{{display: "old prompt"}}
+	m.histIdx = -1
+	m.ta.SetValue("my unsent draft")
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := mm.(Model).ta.Value(); got != "old prompt" {
+		t.Fatalf("↑ should replay history, got %q", got)
+	}
+	mm2, _ := mm.(Model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := mm2.(Model).ta.Value(); got != "my unsent draft" {
+		t.Fatalf("↓ should restore the unsent draft, got %q", got)
+	}
+}
+
 // TestHistoryPushesOnSubmit: successful submit appends to promptHistory and
 // resets the walker index to -1.
 func TestHistoryPushesOnSubmit(t *testing.T) {
