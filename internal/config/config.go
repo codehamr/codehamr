@@ -247,6 +247,10 @@ func writeYAML(path string, v any) error {
 # not the model's theoretical max. For Ollama that's OLLAMA_CONTEXT_LENGTH (or a
 # Modelfile 'PARAMETER num_ctx'); too high and the server silently drops the
 # oldest messages. More VRAM lets you raise both together.
+#
+# Example: qwen3.6:27b can do 256k, but only if your server is told to. Start
+# Ollama with OLLAMA_CONTEXT_LENGTH=262144, then set 'context_size: 262144' here.
+# The 32768 default is the safe stock-Ollama tier that works without that step.
 
 `)
 	// Write to a sibling temp then rename over config.yaml. Rename is atomic
