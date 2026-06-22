@@ -47,9 +47,9 @@ func CreateGist(htmlContent string) (Result, error) {
 		return Result{}, ErrGhNotLoggedIn
 	}
 
-	// `gh gist create --public=false -` reads from stdin and prints the gist
-	// URL to stdout. Using stdin avoids a temp file and a race on cleanup.
-	cmd := exec.Command("gh", "gist", "create", "--public=false", "-")
+	// `gh gist create --public=false -f index.html -` reads from stdin,
+	// naming the gist file index.html so gisthost renders it as the page.
+	cmd := exec.Command("gh", "gist", "create", "--public=false", "-f", "index.html", "-")
 	cmd.Stdin = strings.NewReader(htmlContent)
 	out, err := cmd.Output()
 	if err != nil {
