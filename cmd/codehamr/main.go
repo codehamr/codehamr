@@ -113,8 +113,10 @@ Config:
   .codehamr/config.yaml   per-project settings
 
 Env:
-  CODEHAMR_URL            override the active profile's url at runtime
-  CODEHAMR_IDLE_TIMEOUT   stream idle timeout, e.g. 90m or 1h (default 1h)`))
+  CODEHAMR_AUTO_UPDATE     set to 1 to enable pre-launch auto-update (off by default)
+  CODEHAMR_NO_UPDATE_CHECK set to 1 to hard-disable the update check
+  CODEHAMR_URL             override the active profile's url at runtime
+  CODEHAMR_IDLE_TIMEOUT    stream idle timeout, e.g. 90m or 1h (default 1h)`))
 }
 
 // isLocalBuild reports whether the binary came from a working tree rather
@@ -131,6 +133,13 @@ func isLocalBuild(version string) bool {
 // re-execs via reExec (which only returns on failure). Any failure past
 // "update available" prints one stderr line and proceeds with the old binary.
 func maybeSelfUpdate() {
+	// Auto-update is OFF by default. Opt in with CODEHAMR_AUTO_UPDATE=1
+	// (air-gapped/CI users never see a network call they didn't ask for).
+	// CODEHAMR_NO_UPDATE_CHECK=1 remains honored by update.Check as a
+	// belt-and-suspenders kill switch.
+	if os.Getenv("CODEHAMR_AUTO_UPDATE") != "1" {
+		return
+	}
 	// Skip local builds: hashing a `go run` temp binary against the
 	// published checksum would otherwise swap in the last release and hide
 	// unreleased work behind an "update applied" banner.
