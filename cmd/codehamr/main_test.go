@@ -40,3 +40,23 @@ func TestReexecGuardOverridesPreexistingValue(t *testing.T) {
 		t.Fatalf("guard env resolves to %q, want \"1\" - append() would have left \"0\" first", got)
 	}
 }
+
+// TestAutoUpdateDisabledByDefault pins the opt-in contract: without
+// CODEHAMR_AUTO_UPDATE set, maybeSelfUpdate's gate must read non-"1" so the
+// pre-launch freshness check never runs. Auto-update is off by default; only
+// CODEHAMR_AUTO_UPDATE=1 turns it on (mirrors the CODEHAMR_NO_UPDATE_CHECK
+// opt-out semantics).
+func TestAutoUpdateDisabledByDefault(t *testing.T) {
+	t.Setenv("CODEHAMR_AUTO_UPDATE", "")
+	if os.Getenv("CODEHAMR_AUTO_UPDATE") == "1" {
+		t.Fatal("auto-update gate must be off when CODEHAMR_AUTO_UPDATE is unset")
+	}
+	t.Setenv("CODEHAMR_AUTO_UPDATE", "0")
+	if os.Getenv("CODEHAMR_AUTO_UPDATE") == "1" {
+		t.Fatal("auto-update gate must be off when CODEHAMR_AUTO_UPDATE != \"1\"")
+	}
+	t.Setenv("CODEHAMR_AUTO_UPDATE", "1")
+	if os.Getenv("CODEHAMR_AUTO_UPDATE") != "1" {
+		t.Fatal("auto-update gate must be on when CODEHAMR_AUTO_UPDATE=1")
+	}
+}

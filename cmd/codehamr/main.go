@@ -46,8 +46,8 @@ func main() {
 		update.CleanupOld(exe)
 	}
 
-	// Pre-launch auto-update; all failures are non-fatal and fall through to
-	// the old binary.
+	// Pre-launch auto-update is opt-in: set CODEHAMR_AUTO_UPDATE=1 to enable.
+	// All failures are non-fatal and fall through to the running binary.
 	maybeSelfUpdate()
 
 	cwd := mustCwd()
@@ -114,6 +114,7 @@ Config:
 
 Env:
   CODEHAMR_URL            override the active profile's url at runtime
+  CODEHAMR_AUTO_UPDATE=1  enable pre-launch self-update (disabled by default)
   CODEHAMR_IDLE_TIMEOUT   stream idle timeout, e.g. 90m or 1h (default 1h)`))
 }
 
@@ -125,12 +126,18 @@ func isLocalBuild(version string) bool {
 	return version == "dev" || strings.HasSuffix(version, "-dirty")
 }
 
-// maybeSelfUpdate runs the pre-launch auto-update. No-op for local builds,
+// maybeSelfUpdate runs the pre-launch auto-update. Disabled unless
+// CODEHAMR_AUTO_UPDATE=1 is set (off by default). No-op for local builds,
 // an already-current hash, an unsupported platform (see update.assetName),
 // or any network/filesystem refusal. On success it swaps the binary and
 // re-execs via reExec (which only returns on failure). Any failure past
 // "update available" prints one stderr line and proceeds with the old binary.
+// CODEHAMR_NO_UPDATE_CHECK=1 overrides this off (air-gapped, CI, post-update
+// re-exec).
 func maybeSelfUpdate() {
+	if os.Getenv("CODEHAMR_AUTO_UPDATE") != "1" {
+		return
+	}
 	// Skip local builds: hashing a `go run` temp binary against the
 	// published checksum would otherwise swap in the last release and hide
 	// unreleased work behind an "update applied" banner.
