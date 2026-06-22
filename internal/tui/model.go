@@ -480,6 +480,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case shareResultMsg:
+		if msg.err != nil {
+			m.appendLine(styleError.Render("⚠ share failed: " + msg.err.Error()))
+		} else {
+			m.appendLine(styleOK.Render("✓ shared: " + msg.viewURL))
+			m.appendLine(styleDim.Render("  gist: " + msg.gistURL))
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd

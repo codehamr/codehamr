@@ -66,6 +66,11 @@ var commands = []command{
 			return out
 		},
 	},
+	{
+		name:        "/share",
+		description: "upload session as a secret GitHub gist",
+		handler:     (Model).cmdShare,
+	},
 }
 
 // commandByName returns the registered command for a slash name, or nil.
@@ -332,4 +337,17 @@ func (m *Model) activateHamrpass(key string) tea.Cmd {
 	}
 	m.rebuildClient()
 	return m.confirmActive("hamrpass")
+}
+
+// cmdShare: `/share` renders the current session (system prompt + full history)
+// to HTML and uploads it as a secret GitHub gist via the gh CLI, returning a
+// shareable gisthost URL. The upload runs off the UI goroutine as runShare
+// so the TUI doesn't freeze; the result lands as shareResultMsg.
+func (m Model) cmdShare(_ []string) (tea.Model, tea.Cmd) {
+	if len(m.history) == 0 {
+		m.appendLine(styleWarn.Render("⚠ nothing to share yet - start a conversation first"))
+		return m, nil
+	}
+	m.appendLine(styleDim.Render("▶ sharing..."))
+	return m, runShare(m.history, m.system)
 }
