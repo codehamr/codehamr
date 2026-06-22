@@ -23,30 +23,13 @@ func TestExtractGistID(t *testing.T) {
 	}
 }
 
-func TestExtractOwner(t *testing.T) {
-	cases := []struct {
-		url  string
-		want string
-	}{
-		{"https://gist.github.com/alice/abc123def4567890123456789012345678abcd", "alice"},
-		{"https://gist.github.com/bob/abc123def4567890123456789012345678abcd/", "bob"},
-		{"https://gist.github.com/abc123def4567890123456789012345678abcd", ""}, // no owner segment
-	}
-	for _, c := range cases {
-		got := extractOwner(c.url)
-		if got != c.want {
-			t.Errorf("extractOwner(%q) = %q, want %q", c.url, got, c.want)
-		}
-	}
-}
-
-func TestViewerURLHtmlpreview(t *testing.T) {
+func TestViewerURLGisthost(t *testing.T) {
 	gistURL := "https://gist.github.com/alice/abc123def4567890123456789012345678abcd"
 	gistID := "abc123def4567890123456789012345678abcd"
 	url := viewerURL(gistURL, gistID)
-	want := "https://htmlpreview.github.io/?https://gist.githubusercontent.com/alice/" + gistID + "/raw/"
+	want := "https://gisthost.github.io/?" + gistID
 	if url != want {
-		t.Errorf("viewerURL (htmlpreview) = %q, want %q", url, want)
+		t.Errorf("viewerURL (gisthost) = %q, want %q", url, want)
 	}
 }
 
@@ -61,10 +44,10 @@ func TestViewerURLOverride(t *testing.T) {
 	}
 }
 
-func TestViewerURLFallbackNoOwner(t *testing.T) {
-	// When owner can't be parsed, fall back to the gist URL itself.
-	url := viewerURL("https://gist.github.com/abc123def4567890123456789012345678abcd", "abc123def4567890123456789012345678abcd")
-	if url != "https://gist.github.com/abc123def4567890123456789012345678abcd" {
+func TestViewerURLFallbackNoID(t *testing.T) {
+	// When gist ID is empty, fall back to the gist URL itself.
+	url := viewerURL("https://gist.github.com/abc", "")
+	if url != "https://gist.github.com/abc" {
 		t.Errorf("viewerURL fallback = %q, want gist URL", url)
 	}
 }

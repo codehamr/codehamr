@@ -3339,14 +3339,14 @@ func TestSlashShareWithHistoryDispatches(t *testing.T) {
 func TestShareResultMsgRendersSuccess(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m2, _ := m.update(shareResultMsg{
-		viewURL: "https://htmlpreview.github.io/?https://gist.githubusercontent.com/u/abc/raw/",
-		gistURL: "https://gist.github.com/u/abc",
+		viewURL: "https://gisthost.github.io/?abc123def4567890123456789012345678abcd",
+		gistURL: "https://gist.github.com/u/abc123def4567890123456789012345678abcd",
 	})
 	scroll := stripANSI(m2.(Model).scroll.String())
 	if !strings.Contains(scroll, "shared:") {
 		t.Fatalf("expected 'shared:' line, got: %s", scroll)
 	}
-	if !strings.Contains(scroll, "htmlpreview") {
+	if !strings.Contains(scroll, "gisthost") {
 		t.Fatalf("expected viewer URL in scroll, got: %s", scroll)
 	}
 	if !strings.Contains(scroll, "gist:") {

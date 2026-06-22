@@ -341,7 +341,7 @@ func (m *Model) activateHamrpass(key string) tea.Cmd {
 
 // cmdShare: `/share` renders the current session (system prompt + full history)
 // to HTML and uploads it as a secret GitHub gist via the gh CLI, returning a
-// shareable htmlpreview URL. The upload runs off the UI goroutine as runShare
+// shareable gisthost URL. The upload runs off the UI goroutine as runShare
 // so the TUI doesn't freeze; the result lands as shareResultMsg.
 func (m Model) cmdShare(_ []string) (tea.Model, tea.Cmd) {
 	if len(m.history) == 0 {

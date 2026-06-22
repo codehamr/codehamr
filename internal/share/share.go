@@ -2,9 +2,9 @@
 // and returns a shareable viewer URL.
 //
 // Two viewer modes:
-//   - Default: htmlpreview.github.io, which fetches the gist's raw HTML file
-//     and renders it inline. Requires the raw URL, so the gist owner login is
-//     extracted from the gist URL gh prints.
+//   - Default: gisthost.github.io, Simon Willison's maintained fork of
+//     gistpreview. It fetches the gist via the GitHub API and renders it with
+//     document.write(), so only the gist ID is needed (no owner/raw URL).
 //   - Override: CODEHAMR_SHARE_VIEWER_URL (e.g. "https://codehamr.com/session/")
 //     makes viewerURL append "#<gistID>" to that base, matching pi.dev's
 //     convention for a self-hosted viewer that fetches the gist by ID.
@@ -90,17 +90,6 @@ func extractGistID(gistURL string) string {
 	return id
 }
 
-// extractOwner pulls the login segment between "gist.github.com/" and the ID.
-func extractOwner(gistURL string) string {
-	s := strings.TrimSuffix(gistURL, "/")
-	parts := strings.Split(s, "/")
-	// ["https:", "", "gist.github.com", "<owner>", "<id>"]
-	if len(parts) >= 5 {
-		return parts[len(parts)-2]
-	}
-	return ""
-}
-
 // viewerURL builds the shareable preview URL for the gist.
 func viewerURL(gistURL, gistID string) string {
 	if base := strings.TrimSpace(os.Getenv("CODEHAMR_SHARE_VIEWER_URL")); base != "" {
@@ -110,12 +99,11 @@ func viewerURL(gistURL, gistID string) string {
 		}
 		return base + gistID
 	}
-	// Default: htmlpreview.github.io needs the raw gist URL.
-	owner := extractOwner(gistURL)
-	if owner == "" {
-		// Fallback: link the gist itself if we can't build the raw URL.
+	// Default: gisthost.github.io only needs the gist ID as the query string.
+	// (Fork of gistpreview.github.io; handles Substack URL mangling and
+	// truncated files via the GitHub Gist API + document.write.)
+	if gistID == "" {
 		return gistURL
 	}
-	rawURL := fmt.Sprintf("https://gist.githubusercontent.com/%s/%s/raw/", owner, gistID)
-	return "https://htmlpreview.github.io/?" + rawURL
+	return "https://gisthost.github.io/?" + gistID
 }
