@@ -344,7 +344,7 @@ func (m Model) Init() tea.Cmd {
 	// (local Ollama) profiles get the cheaper Reachable ping: no headers to
 	// harvest, so a full probe would buy nothing.
 	connectivity := pingBackend(m.cli.BaseURL)
-	if p := m.cfg.ActiveProfile(); p != nil && p.Key != "" {
+	if p := m.cfg.ActiveProfile(); p != nil && p.ResolvedKey() != "" {
 		connectivity = probeBackend(m.cli, m.cfg.Active, true)
 	}
 	return tea.Batch(
