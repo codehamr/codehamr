@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -3294,4 +3295,76 @@ func drainFinal(t *testing.T, m Model, prompt string) Model {
 	mm, cmd := m.submit(prompt, prompt, promptEntry{display: prompt})
 	out, _ := drain(mm, cmd)
 	return out.(Model)
+}
+
+// --- /share tests -----------------------------------------------------------
+
+// TestSlashShareEmptyHistoryRejects: /share with no conversation warns and
+// returns no command (no gist upload attempted).
+func TestSlashShareEmptyHistoryRejects(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	if len(m.history) != 0 {
+		t.Fatal("precondition: history empty")
+	}
+	m2, cmd := m.runSlash("/share")
+	if cmd != nil {
+		t.Fatal("/share on empty history should return no command")
+	}
+	scroll := stripANSI(m2.(Model).scroll.String())
+	if !strings.Contains(scroll, "nothing to share") {
+		t.Fatalf("expected 'nothing to share' warning, got: %s", scroll)
+	}
+}
+
+// TestSlashShareWithHistoryDispatches: /share with conversation history
+// returns a tea.Cmd (the async runShare), and prints the "sharing..." hint.
+func TestSlashShareWithHistoryDispatches(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.history = append(m.history,
+		chmctx.Message{Role: chmctx.RoleUser, Content: "hello"},
+		chmctx.Message{Role: chmctx.RoleAssistant, Content: "world"},
+	)
+	m2, cmd := m.runSlash("/share")
+	if cmd == nil {
+		t.Fatal("/share with history should return a Cmd")
+	}
+	scroll := stripANSI(m2.(Model).scroll.String())
+	if !strings.Contains(scroll, "sharing...") {
+		t.Fatalf("expected 'sharing...' hint, got: %s", scroll)
+	}
+}
+
+// TestShareResultMsgRendersSuccess: a successful shareResultMsg prints the
+// viewer URL and gist URL to scrollback.
+func TestShareResultMsgRendersSuccess(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m2, _ := m.update(shareResultMsg{
+		viewURL: "https://htmlpreview.github.io/?https://gist.githubusercontent.com/u/abc/raw/",
+		gistURL: "https://gist.github.com/u/abc",
+	})
+	scroll := stripANSI(m2.(Model).scroll.String())
+	if !strings.Contains(scroll, "shared:") {
+		t.Fatalf("expected 'shared:' line, got: %s", scroll)
+	}
+	if !strings.Contains(scroll, "htmlpreview") {
+		t.Fatalf("expected viewer URL in scroll, got: %s", scroll)
+	}
+	if !strings.Contains(scroll, "gist:") {
+		t.Fatalf("expected gist: line, got: %s", scroll)
+	}
+}
+
+// TestShareResultMsgRendersError: a failed shareResultMsg prints the error.
+func TestShareResultMsgRendersError(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m2, _ := m.update(shareResultMsg{
+		err: errors.New("gh not installed"),
+	})
+	scroll := stripANSI(m2.(Model).scroll.String())
+	if !strings.Contains(scroll, "share failed") {
+		t.Fatalf("expected 'share failed' error, got: %s", scroll)
+	}
+	if !strings.Contains(scroll, "gh not installed") {
+		t.Fatalf("expected error text in scroll, got: %s", scroll)
+	}
 }

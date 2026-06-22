@@ -8,7 +8,9 @@ import (
 
 	"github.com/codehamr/codehamr/internal/cloud"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
+	"github.com/codehamr/codehamr/internal/export"
 	"github.com/codehamr/codehamr/internal/llm"
+	"github.com/codehamr/codehamr/internal/share"
 	"github.com/codehamr/codehamr/internal/tools"
 )
 
@@ -81,4 +83,29 @@ func (m Model) errorMessage(e llm.Event) string {
 func isUnreachable(err error) bool {
 	_, ok := errors.AsType[cloud.ErrUnreachable](err)
 	return ok
+}
+
+// shareResultMsg carries the outcome of an async /share gist upload back to
+// Update. Errors carry a human hint; success carries the viewer + gist URLs.
+type shareResultMsg struct {
+	viewURL string
+	gistURL string
+	err     error
+}
+
+// runShare renders the current session to HTML and uploads it as a secret
+// GitHub gist off the UI goroutine, so the TUI doesn't freeze on the network
+// round-trip. The result lands as shareResultMsg.
+func runShare(history []chmctx.Message, systemPrompt string) tea.Cmd {
+	return func() tea.Msg {
+		html, err := export.ToHTML(history, systemPrompt)
+		if err != nil {
+			return shareResultMsg{err: err}
+		}
+		res, err := share.CreateGist(html)
+		if err != nil {
+			return shareResultMsg{err: err}
+		}
+		return shareResultMsg{viewURL: res.ViewURL, gistURL: res.GistURL}
+	}
 }
