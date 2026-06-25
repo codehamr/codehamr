@@ -102,8 +102,8 @@ func TestPackNewestFirstWhole(t *testing.T) {
 	// Each message costs Tokens(4000 bytes)+8 = 1008. Budget 2500 keeps newest
 	// (1008) and msg3 (2016 <= 2500), breaks before msg2 (3024 > 2500), so
 	// exactly 2, pinning the `used+cost > budget` break against off-by-one.
-	if r.Kept != 2 {
-		t.Fatalf("kept=%d want exactly 2", r.Kept)
+	if len(r.Messages) != 2 {
+		t.Fatalf("kept=%d want exactly 2", len(r.Messages))
 	}
 	// last message must always be kept
 	if r.Messages[len(r.Messages)-1].Content != big {
@@ -118,8 +118,8 @@ func TestPackAlwaysKeepsNewest(t *testing.T) {
 		{Role: RoleUser, Content: massive},
 	}
 	r := Pack(history, 100)
-	if r.Kept != 1 {
-		t.Fatalf("expected only newest kept, got %d", r.Kept)
+	if len(r.Messages) != 1 {
+		t.Fatalf("expected only newest kept, got %d", len(r.Messages))
 	}
 	if r.Messages[0].Content != massive {
 		t.Fatal("newest should have been kept even if over budget")
@@ -200,7 +200,7 @@ func TestPackKeepsNewestToolPairOverBudget(t *testing.T) {
 		{Role: RoleTool, ToolCallID: "c1", Content: "wrote 20000 bytes"},
 	}
 	r := Pack(history, 500) // far below the assistant's cost
-	if r.Kept == 0 {
+	if len(r.Messages) == 0 {
 		t.Fatal("Pack collapsed to zero messages - newest tool pair was dropped")
 	}
 	var sawAssistant, sawTool bool
@@ -233,7 +233,7 @@ func TestPackKeepsNewestParallelToolGroupOverBudget(t *testing.T) {
 		{Role: RoleTool, ToolCallID: "c2", Content: "out2"},
 	}
 	r := Pack(history, 300)
-	if r.Kept == 0 {
+	if len(r.Messages) == 0 {
 		t.Fatal("Pack collapsed to zero messages - parallel tool group was dropped")
 	}
 	ids := map[string]bool{}

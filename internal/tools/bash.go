@@ -186,7 +186,11 @@ func InlineStatus(call chmctx.ToolCall) string {
 }
 
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
+	// IndexAny over both separators, not just '\n', so a CR or CRLF first line
+	// (old-mac or pasted command) cuts at the same point instead of leaking a
+	// bare '\r' that would yank the status line's cursor back. Mirrors
+	// llm.firstLine.
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
 	if len(s) > 120 {

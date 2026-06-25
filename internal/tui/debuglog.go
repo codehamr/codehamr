@@ -148,10 +148,7 @@ func dbgWriteRequest(model string, ctxSize, budget, historyLen int, packed []chm
 // dbgWriteMessage records a chmctx.Message readably: content and tool calls
 // each get a labeled section. No-op when logging is off, so callers needn't guard.
 func dbgWriteMessage(category string, msg chmctx.Message) {
-	dbgMu.Lock()
-	enabled := dbgFile != nil
-	dbgMu.Unlock()
-	if !enabled {
+	if !dbgEnabled() {
 		return
 	}
 	var b strings.Builder

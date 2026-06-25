@@ -248,9 +248,11 @@ func (p promptInput) handleChipKey(msg tea.KeyMsg) (bool, promptInput) {
 	return false, p
 }
 
-// insertChip splices a chip label in at the cursor, keeping spans sorted by
-// start: find the insertion index, shift later spans by the label length, then
-// splice. The trailing reconcile() is belt-and-braces, usually a no-op.
+// insertChip splices a chip label in at the cursor, recording the new span at
+// the right ORDER position so the following reconcile() walks the labels
+// left-to-right correctly. reconcile re-derives every span's start/end from the
+// updated value, so the offsets on the inserted literal are placeholders it
+// overwrites: only the insertion index matters here.
 func (p *promptInput) insertChip(content string) {
 	lines := countLines(content)
 	id := p.nextID
@@ -272,10 +274,6 @@ func (p *promptInput) insertChip(content string) {
 		} else {
 			break
 		}
-	}
-	for i := insertIdx; i < len(p.spans); i++ {
-		p.spans[i].start += labelLen
-		p.spans[i].end += labelLen
 	}
 	p.spans = slices.Insert(p.spans, insertIdx,
 		chipSpan{id: id, start: insertAt, end: insertAt + labelLen})

@@ -118,10 +118,9 @@ func runeBoundaryUp(out string, i int) int {
 	return i
 }
 
-// PackResult records what Pack kept: the packed messages and their count.
+// PackResult records what Pack kept: the packed messages.
 type PackResult struct {
 	Messages []Message
-	Kept     int
 }
 
 // Pack keeps whole messages newest-first until the budget is full, then
@@ -175,10 +174,7 @@ func Pack(history []Message, budget int) PackResult {
 	}
 	kept = anchorUserMessage(kept, history)
 	kept = demoteSystemMessages(kept)
-	return PackResult{
-		Messages: kept,
-		Kept:     len(kept),
-	}
+	return PackResult{Messages: kept}
 }
 
 // anchorUserMessage guarantees the packed window carries a user-role message
