@@ -114,12 +114,12 @@ func (m *Model) reloadConfigFromDisk() error {
 
 	prevURL := m.cfg.ActiveURL()
 	prevProfile := m.cfg.ActiveProfile()
-	prevLLM, prevKey := prevProfile.LLM, prevProfile.Key
+	prevLLM, prevKey := prevProfile.LLM, prevProfile.ResolvedKey()
 
 	m.cfg = fresh
 
 	newProfile := m.cfg.ActiveProfile()
-	if prevURL != m.cfg.ActiveURL() || prevLLM != newProfile.LLM || prevKey != newProfile.Key {
+	if prevURL != m.cfg.ActiveURL() || prevLLM != newProfile.LLM || prevKey != newProfile.ResolvedKey() {
 		m.rebuildClient()
 	}
 	return nil
@@ -172,7 +172,7 @@ func (m *Model) printModelList() {
 // synchronously. Shared by /models and /hamrpass.
 func (m *Model) confirmActive(profile string) tea.Cmd {
 	p := m.cfg.ActiveProfile()
-	if p.Key != "" {
+	if p.ResolvedKey() != "" {
 		m.appendLine(styleDim.Render(fmt.Sprintf("▶ probing %s · %s @ %s", profile, p.LLM, p.URL)))
 		return probeBackend(m.cli, profile, false)
 	}
@@ -186,7 +186,7 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 // endpoint, fresh slate.
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()
-	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.Key)
+	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.ResolvedKey())
 	// Drop the prior profile's cached BudgetStatus. m.budget has no profile
 	// association, so without this reset the footer keeps rendering the old
 	// "88% pass" segment after switching to a local profile that emits no

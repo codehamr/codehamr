@@ -656,6 +656,44 @@ func TestBootstrapRefusesNonDirectoryAtCodehamrPath(t *testing.T) {
 	}
 }
 
+// TestResolvedKeyExpandsEnvVar: `key: ${MY_KEY}` in config.yaml must expand
+// the env var at read time while the raw reference round-trips on Save. This
+// is the core of the "no plaintext secret on disk" path.
+func TestResolvedKeyExpandsEnvVar(t *testing.T) {
+	p := &Profile{Key: "${TEST_CODEHAMR_KEY}"}
+	if err := os.Setenv("TEST_CODEHAMR_KEY", "sk-resolved-123"); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Unsetenv("TEST_CODEHAMR_KEY")
+
+	if got := p.ResolvedKey(); got != "sk-resolved-123" {
+		t.Fatalf("ResolvedKey() = %q, want sk-resolved-123", got)
+	}
+	// Raw Key must be untouched: Save writes this, not the expanded value.
+	if p.Key != "${TEST_CODEHAMR_KEY}" {
+		t.Fatalf("ResolvedKey() mutated raw Key to %q - must stay ${TEST_CODEHAMR_KEY} for Save", p.Key)
+	}
+}
+
+// TestResolvedKeyPassesLiteralThrough: a plaintext key with no $-references
+// must pass through unchanged so existing configs keep working.
+func TestResolvedKeyPassesLiteralThrough(t *testing.T) {
+	p := &Profile{Key: "sk-literal-abc"}
+	if got := p.ResolvedKey(); got != "sk-literal-abc" {
+		t.Fatalf("ResolvedKey() = %q, want sk-literal-abc", got)
+	}
+}
+
+// TestResolvedKeyUnsetEnvYieldsEmpty: ${VAR} with VAR unset expands to "",
+// matching the "no key" branch (keyless local Ollama) without a panic.
+func TestResolvedKeyUnsetEnvYieldsEmpty(t *testing.T) {
+	os.Unsetenv("TEST_CODEHAMR_MISSING")
+	p := &Profile{Key: "${TEST_CODEHAMR_MISSING}"}
+	if got := p.ResolvedKey(); got != "" {
+		t.Fatalf("ResolvedKey() = %q, want empty for unset env var", got)
+	}
+}
+
 // TestURLOverrideDoesNotPersist: a CODEHAMR_URL override lives in
 // cfg.URLOverride and ActiveURL reflects it, but Save writes only the stored
 // URL, so re-bootstrapping without the env var restores the original endpoint.

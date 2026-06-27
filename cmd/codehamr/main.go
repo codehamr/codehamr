@@ -68,7 +68,7 @@ func main() {
 	}
 
 	p := cfg.ActiveProfile()
-	client := llm.New(cfg.ActiveURL(), p.LLM, p.Key)
+	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey())
 
 	abs, _ := filepath.Abs(cwd)
 	m := tui.New(cfg, client, abs, version)

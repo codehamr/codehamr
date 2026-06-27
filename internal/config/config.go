@@ -220,6 +220,16 @@ func (c *Config) EnsureHamrpass() *Profile {
 	return c.Models["hamrpass"]
 }
 
+// ResolvedKey returns the profile's key with ${VAR} / $VAR references expanded
+// against the process environment. Lets config.yaml carry `key: ${MY_KEY}`
+// instead of a plaintext secret: the reference is what round-trips on Save,
+// the expansion happens only at read time so the resolved value never touches
+// disk. A literal key (no $-references) passes through unchanged. Use this at
+// every site that dials out or branches on "is this profile keyed".
+func (p *Profile) ResolvedKey() string {
+	return os.ExpandEnv(p.Key)
+}
+
 // Save rewrites config.yaml.
 func (c *Config) Save() error {
 	if c.Dir == "" {
@@ -242,6 +252,9 @@ func writeYAML(path string, v any) error {
 #
 # Running codehamr in a devcontainer / WSL2 with Ollama on the host:
 # swap 'http://localhost:11434' with 'http://host.docker.internal:11434' below.
+#
+# Keys: ` + "`key: ${MY_KEY}`" + ` expands the env var at runtime, so the reference (not
+# the secret) round-trips on Save. Literal keys still work for backward compat.
 #
 # context_size is what codehamr packs to - set it to your server's ACTUAL window,
 # not the model's theoretical max. For Ollama that's OLLAMA_CONTEXT_LENGTH (or a
