@@ -505,9 +505,11 @@ func TestChat402(t *testing.T) {
 	}
 }
 
-// TestChatUnreachable: transport failure surfaces as ErrUnreachable.
+// TestChatUnreachable: transport failure surfaces as ErrUnreachable. Retries
+// off: this test pins the terminal error surface, not the retry path.
 func TestChatUnreachable(t *testing.T) {
 	c := New("http://127.0.0.1:1", "m", "")
+	c.RetryBackoff = nil
 	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 {
 		t.Fatalf("want single event, got %d", len(evs))
@@ -519,7 +521,8 @@ func TestChatUnreachable(t *testing.T) {
 }
 
 // TestChatOtherHTTPError: non-2xx (not 401/402) surfaces as a generic error
-// carrying only the first body line.
+// carrying only the first body line. Retries off: this test pins the terminal
+// error surface, not the retry path.
 func TestChatOtherHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -527,7 +530,9 @@ func TestChatOtherHTTPError(t *testing.T) {
 		fmt.Fprintln(w, "see logs")
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = nil
+	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -551,7 +556,9 @@ func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"upstream rate limited","type":"rate_limited","upstream_status":429,"provider_hint":"the upstream model is temporarily rate-limited, retry shortly"}}`)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = nil // pin the terminal error surface, not the retry path
+	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -575,7 +582,9 @@ func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"upstream unavailable","type":"upstream_unavailable","upstream_status":503}}`)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = nil // pin the terminal error surface, not the retry path
+	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -948,5 +957,177 @@ func TestToWireParseErrorArgsStayValidJSON(t *testing.T) {
 	args := toWire(msgs)[0].ToolCalls[0].Function.Arguments
 	if !json.Valid([]byte(args)) {
 		t.Fatalf("arguments must stay valid JSON to avoid poisoning the session: %q", args)
+	}
+}
+
+// TestChatRetriesTransient404: a proxy that hiccups (two 404s, then a clean
+// stream) is retried transparently. The user sees one EventRetry per wait,
+// then normal content — never an EventError. Pins the issue-#7 fix: LiteLLM
+// fronting Agnes AI emits transient 404s and the turn used to die on the first.
+func TestChatRetriesTransient404(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"detail":"Not Found"}`)
+			return
+		}
+		sseOK(w, []string{`{"choices":[{"delta":{"content":"ok"}}]}`})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	evs := collect(c.Chat(context.Background(),
+		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
+
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3 (two failures + one success)", attempts)
+	}
+	var retries int
+	var sawDone bool
+	for _, e := range evs {
+		switch e.Kind {
+		case EventRetry:
+			retries++
+			if e.Content == "" || e.Err == nil {
+				t.Errorf("retry event must carry a status hint and the trigger error: %+v", e)
+			}
+		case EventDone:
+			sawDone = true
+		case EventError:
+			t.Fatalf("recovered turn must not surface an error: %v", e.Err)
+		}
+	}
+	if retries != 2 {
+		t.Fatalf("retry events = %d, want 2", retries)
+	}
+	if !sawDone {
+		t.Fatal("no done event after successful retry")
+	}
+}
+
+// TestChatRetryGivesUpAfterBackoffExhausted: a permanently failing backend gets
+// len(RetryBackoff) retries, then the last error surfaces and the turn unwinds
+// back to the user.
+func TestChatRetryGivesUpAfterBackoffExhausted(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "down")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	evs := collect(c.Chat(context.Background(), nil, nil))
+
+	if attempts != 4 {
+		t.Fatalf("attempts = %d, want 4 (initial + 3 retries)", attempts)
+	}
+	last := evs[len(evs)-1]
+	if last.Kind != EventError || !strings.Contains(last.Err.Error(), "503") {
+		t.Fatalf("want final EventError carrying the 503, got %+v", last)
+	}
+}
+
+// TestChatDoesNotRetryPermanentErrors: auth (401), depleted pass (402), and
+// malformed request (400) fail identically on every resend; exactly one
+// attempt, straight to EventError.
+func TestChatDoesNotRetryPermanentErrors(t *testing.T) {
+	for _, status := range []int{400, 401, 403} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			attempts := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts++
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, "m", "")
+			c.RetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			evs := collect(c.Chat(context.Background(), nil, nil))
+			if attempts != 1 {
+				t.Fatalf("attempts = %d, want 1 (no retry on %d)", attempts, status)
+			}
+			if len(evs) != 1 || evs[0].Kind != EventError {
+				t.Fatalf("want single error event, got %+v", evs)
+			}
+		})
+	}
+}
+
+// TestChatRetryWaitCancelable: Ctrl+C during a backoff wait must unwind the
+// turn immediately, not after the remaining sleep. The wait select must have a
+// parent.Done() arm.
+func TestChatRetryWaitCancelable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	c.RetryBackoff = []time.Duration{time.Minute}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := c.Chat(ctx, nil, nil)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	collect(ch) // channel must close promptly once cancel fires
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("retry wait ignored cancellation: channel closed after %s", elapsed)
+	}
+}
+
+// TestRetryableClassification: network errors and transient statuses retry;
+// typed sentinels (401/402), client errors, and unknown errors do not. 404 is
+// deliberately in the retry set (LiteLLM proxies emit it transiently, #7).
+func TestRetryableClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unreachable", cloud.ErrUnreachable{Err: errors.New("refused")}, true},
+		{"404", &httpStatusError{status: 404, msg: "not found"}, true},
+		{"408", &httpStatusError{status: 408, msg: "timeout"}, true},
+		{"429", &httpStatusError{status: 429, msg: "rate limited"}, true},
+		{"500", &httpStatusError{status: 500, msg: "boom"}, true},
+		{"503", &httpStatusError{status: 503, msg: "down"}, true},
+		{"400", &httpStatusError{status: 400, msg: "bad request"}, false},
+		{"403", &httpStatusError{status: 403, msg: "forbidden"}, false},
+		{"unauthorized", cloud.ErrUnauthorized, false},
+		{"depleted", cloud.ErrBudgetExhausted, false},
+		{"misc", errors.New("something"), false},
+	}
+	for _, tc := range cases {
+		if got := retryable(tc.err); got != tc.want {
+			t.Errorf("retryable(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestProbeDoesNotRetry: the startup probe exists for fast feedback on a
+// misconfigured URL/model/key; it must fail on the first response, never sit
+// out retry backoffs.
+func TestProbeDoesNotRetry(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	if _, err := c.Probe(context.Background()); err == nil {
+		t.Fatal("probe against a 404 backend must fail")
+	}
+	if attempts != 1 {
+		t.Fatalf("probe attempts = %d, want 1", attempts)
 	}
 }

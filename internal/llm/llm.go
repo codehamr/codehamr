@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -160,6 +161,12 @@ const (
 	// so the UI's live token estimate keeps ticking while the model writes a
 	// file, instead of freezing until EventDone.
 	EventToolArgs
+	// EventRetry announces one transparent resend after a transient pre-stream
+	// failure (see retryable): Content carries a short status-bar hint
+	// ("retry 1/3 in 2s"), Err the failure that triggered it. Purely
+	// informational — it never touches history — and exists so the backoff
+	// wait doesn't read as a frozen turn.
+	EventRetry
 )
 
 // streamIdleTimeout bounds how long readSSE waits for the NEXT SSE frame before
@@ -209,6 +216,13 @@ func idleTimeoutFromEnv() time.Duration {
 	return streamIdleTimeout
 }
 
+// defaultRetryBackoff paces the transparent resends after a transient
+// pre-stream failure (see retryable), one wait per retry. Rising steps: short
+// enough that a proxy hiccup heals invisibly, and a *permanently* failing
+// request (e.g. a genuinely wrong model name 404ing forever) still surfaces
+// after ~22s total instead of minutes.
+var defaultRetryBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
+
 type Client struct {
 	BaseURL string
 	Model   string
@@ -218,6 +232,11 @@ type Client struct {
 	// A field, not a bare const, only so tests can shorten it; New sets the
 	// default and nothing else writes it.
 	IdleTimeout time.Duration
+	// RetryBackoff spaces Chat's pre-stream retries on transient failures;
+	// len is the retry count, nil/empty disables. A field, not a bare const,
+	// only so tests can shorten it; New sets the default and nothing else
+	// writes it.
+	RetryBackoff []time.Duration
 	// noReasoningEffort goes true once the server 400s on reasoning for this
 	// model (newer OpenAI models reject tools + reasoning_effort here, pushing
 	// that combo onto /v1/responses; Ollama rejects it on non-thinking models).
@@ -238,11 +257,12 @@ type Client struct {
 // bounded by Go's default Dialer (30s).
 func New(base, model, token string) *Client {
 	return &Client{
-		BaseURL:     strings.TrimRight(base, "/"),
-		Model:       model,
-		Token:       token,
-		HTTP:        &http.Client{},
-		IdleTimeout: idleTimeoutFromEnv(),
+		BaseURL:      strings.TrimRight(base, "/"),
+		Model:        model,
+		Token:        token,
+		HTTP:         &http.Client{},
+		IdleTimeout:  idleTimeoutFromEnv(),
+		RetryBackoff: defaultRetryBackoff,
 	}
 }
 
@@ -294,7 +314,27 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	defer close(out)
 	start := time.Now()
 
+	// Pre-stream retry: transient failures (proxy hiccups: 5xx, 429, LiteLLM's
+	// transient 404) are resent after a rising backoff instead of killing the
+	// turn. Only here, before any token has streamed — a mid-stream resend
+	// would duplicate content already in the transcript. Probe stays
+	// retry-free: its job is fast feedback on a misconfigured profile.
 	resp, errEvt := c.sendChat(parent, msgs, tools)
+	for attempt := 0; errEvt != nil && attempt < len(c.RetryBackoff) && retryable(errEvt.Err); attempt++ {
+		delay := c.RetryBackoff[attempt]
+		hint := fmt.Sprintf("retry %d/%d in %s", attempt+1, len(c.RetryBackoff), delay)
+		if !sendEvent(parent, out, Event{Kind: EventRetry, Content: hint, Err: errEvt.Err}) {
+			return
+		}
+		select {
+		case <-time.After(delay):
+		case <-parent.Done():
+			// Ctrl+C during the wait: unwind silently, exactly like a
+			// cancelled sendEvent — the TUI already aborted the turn.
+			return
+		}
+		resp, errEvt = c.sendChat(parent, msgs, tools)
+	}
 	if errEvt != nil {
 		sendEvent(parent, out, *errEvt)
 		return
@@ -434,8 +474,37 @@ func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Respons
 		return nil, cloud.BudgetStatus{Set: true, Remaining: 0}, nil, cloud.ErrBudgetExhausted
 	default:
 		b, _ := io.ReadAll(resp.Body)
-		return nil, cloud.BudgetStatus{}, b, fmt.Errorf("%d: %s", resp.StatusCode, errorMessageFromBody(b))
+		return nil, cloud.BudgetStatus{}, b, &httpStatusError{status: resp.StatusCode, msg: errorMessageFromBody(b)}
 	}
+}
+
+// httpStatusError preserves the HTTP status behind the user-facing message so
+// retryable can classify transience; Error() keeps the exact "status: message"
+// string the error banner has always shown.
+type httpStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("%d: %s", e.status, e.msg) }
+
+// retryable reports whether a pre-stream failure is worth resending: transport
+// errors and the statuses that signal a transient server state. 404 is
+// semantically permanent, but LiteLLM-style proxies emit it for transient
+// upstream misses (the Agnes-AI freeze in issue #7), and the rising backoff
+// bounds the cost of a truly permanent one. 401/402 arrive as typed sentinels
+// the UI handles; 400 and other client errors fail identically on every
+// resend.
+func retryable(err error) bool {
+	var un cloud.ErrUnreachable
+	if errors.As(err, &un) {
+		return true
+	}
+	var hs *httpStatusError
+	if errors.As(err, &hs) {
+		return hs.status == 404 || hs.status == 408 || hs.status == 429 || hs.status >= 500
+	}
+	return false
 }
 
 // errorMessageFromBody extracts the user-facing string from a non-2xx body.

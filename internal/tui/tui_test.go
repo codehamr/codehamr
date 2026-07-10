@@ -3365,3 +3365,65 @@ func drainFinal(t *testing.T, m Model, prompt string) Model {
 	out, _ := drain(mm, cmd)
 	return out.(Model)
 }
+
+// TestRetryEventDrivesStatusBar: an EventRetry surfaces the backoff hint in
+// the status bar (so the wait doesn't read as a frozen turn), and the next
+// stream event clears it — content means the retry succeeded, an error means
+// the banner takes over.
+func TestRetryEventDrivesStatusBar(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.phase = phaseThinking
+
+	out, _ := m.handleStream(llm.Event{Kind: llm.EventRetry, Content: "retry 1/3 in 2s", Err: fmt.Errorf("404: not found")})
+	m = out.(Model)
+	if m.status != "retry 1/3 in 2s" {
+		t.Fatalf("retry hint must land in the status bar, got %q", m.status)
+	}
+
+	out, _ = m.handleStream(llm.Event{Kind: llm.EventContent, Content: "hi"})
+	m = out.(Model)
+	if m.status != "" {
+		t.Fatalf("status must clear once the stream resumes, got %q", m.status)
+	}
+}
+
+// TestSubmitRecoversFromTransient404EndToEnd: the full submit → stream loop
+// against a backend whose first response is a 404 (the issue-#7 Agnes-AI/
+// LiteLLM hiccup). The turn must retry transparently and finish with the
+// assistant's content in scrollback, never an error banner.
+func TestSubmitRecoversFromTransient404EndToEnd(t *testing.T) {
+	attempts := 0
+	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"detail":"Not Found"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"recovered"}}]}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	m.cli.RetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+
+	mm, cmd := m.submit("ping", "ping", promptEntry{display: "ping"})
+	out, _ := drain(mm, cmd)
+	final := out.(Model)
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (one 404, one success)", attempts)
+	}
+	scroll := stripANSI(final.scroll.String())
+	if !strings.Contains(scroll, "recovered") {
+		t.Fatalf("assistant content missing after retry: %q", scroll)
+	}
+	if strings.Contains(scroll, "404") {
+		t.Fatalf("a recovered turn must not surface the 404 to the user: %q", scroll)
+	}
+	if final.status != "" {
+		t.Fatalf("retry hint must be cleared after recovery, got %q", final.status)
+	}
+	if final.phase.active() {
+		t.Fatalf("turn must end idle, phase=%v", final.phase)
+	}
+}

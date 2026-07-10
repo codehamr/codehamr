@@ -207,6 +207,12 @@ type Model struct {
 	status string // transient status-bar hint; cleared by the event that obsoletes it (keypress, quit-arm timer, endTurn)
 	phase  phase  // idle / thinking / streaming / running
 
+	// retrying marks that status currently shows an llm.EventRetry backoff
+	// hint; the next non-retry stream event clears it (content = the retry
+	// succeeded, error = the banner takes over). A flag rather than a text
+	// compare because the hint is dynamic ("retry 1/3 in 2s").
+	retrying bool
+
 	// Repeated-failure nudge, the first of the four deterministic backstops. A
 	// turn otherwise ends purely when the model stops calling tools; nothing
 	// forces a tool or yields. lastToolKey is the most recently dispatched tool's
@@ -667,6 +673,12 @@ func (m *Model) endTurn() {
 	if m.status == queueSlashHint {
 		m.status = ""
 	}
+	// A retry hint dies with its turn: a Ctrl+C during the backoff wait would
+	// otherwise leave "retry 1/3 in 15s" stranded in the idle status bar.
+	if m.retrying {
+		m.retrying = false
+		m.status = ""
+	}
 }
 
 func (m *Model) buildMessages() []chmctx.Message {
@@ -715,7 +727,20 @@ func (m Model) handleStream(e llm.Event) (tea.Model, tea.Cmd) {
 	if !m.phase.active() {
 		return m, readEvent(m.stream)
 	}
+	// A retry hint is obsolete the moment anything else arrives: content means
+	// the resend succeeded, an error means the banner takes over.
+	if m.retrying && e.Kind != llm.EventRetry {
+		m.retrying = false
+		m.status = ""
+	}
 	switch e.Kind {
+	case llm.EventRetry:
+		// The client is waiting out a backoff before resending a transiently
+		// failed request. Surface the wait in the status bar so it doesn't
+		// read as a frozen turn; history is untouched.
+		m.retrying = true
+		m.status = e.Content
+		dbgWritef("retry", "%s (%v)", e.Content, e.Err)
 	case llm.EventContent:
 		m.applyContent(e)
 	case llm.EventReasoning:
