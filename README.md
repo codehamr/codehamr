@@ -124,4 +124,10 @@ There's a waitlist at [codehamr.com](https://codehamr.com). HamrPass only gets b
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&logscale&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm)](https://www.star-history.com/?repos=codehamr%2Fcodehamr&type=date&logscale=&legend=top-left)
+<a href="https://www.star-history.com/?repos=codehamr%2Fcodehamr&type=date&logscale=&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&theme=dark&logscale&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&logscale&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&logscale&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
+ </picture>
+</a>
