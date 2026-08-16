@@ -409,28 +409,43 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 }
 
 // postChat dispatches via doPost; on a 400 rejecting reasoning it drops
-// reasoning_effort for this Client's lifetime and retries once. Two wild
-// flavours, both caught by substring match: newer OpenAI models
-// ("reasoning_effort … not supported") and Ollama non-thinking models
-// ("<model> does not support thinking"). Each signal is the provider's own
-// phrase ("not support"+"reasoning_effort", or the literal "does not support
-// thinking") so an unrelated 400 that merely contains the word "thinking"
-// can't trip the fallback and latch reasoning off for the Client's whole life.
+// reasoning_effort for this Client's lifetime and retries once.
 // Probe never sets ReasoningEffort, so its 400 can't trip the flag.
 func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, error) {
 	if c.noReasoningEffort.Load() {
 		body.ReasoningEffort = ""
 	}
 	resp, budget, errBody, err := c.doPost(parent, body)
-	if err != nil && body.ReasoningEffort != "" &&
-		((bytes.Contains(errBody, []byte("not support")) &&
-			bytes.Contains(errBody, []byte("reasoning_effort"))) ||
-			bytes.Contains(errBody, []byte("does not support thinking"))) {
+	if err != nil && body.ReasoningEffort != "" && rejectsReasoning(errBody) {
 		c.noReasoningEffort.Store(true)
 		body.ReasoningEffort = ""
 		resp, budget, _, err = c.doPost(parent, body)
 	}
 	return resp, budget, err
+}
+
+// rejectsReasoning reports whether an error body is a server refusing our
+// reasoning_effort, as opposed to any other 400. Three wild flavours, all
+// caught by substring match: newer OpenAI models ("reasoning_effort … not
+// supported" alongside tools), Ollama non-thinking models ("<model> does not
+// support thinking"), and models whose scale simply omits our value ("Unexpected
+// reasoning effort high" — Qwen3.8 defines xhigh/medium/low, with no `high`).
+// Each signal is the provider's own phrase, never a lone generic word, so an
+// unrelated 400 that merely mentions "thinking" can't latch reasoning off for
+// the Client's whole life. Dropping the field is the right remedy for all
+// three: the server then applies its own default (on the Qwen3.8 scale that is
+// xhigh, i.e. more reasoning than we asked for, not less).
+func rejectsReasoning(errBody []byte) bool {
+	switch {
+	case bytes.Contains(errBody, []byte("not support")) &&
+		bytes.Contains(errBody, []byte("reasoning_effort")):
+		return true
+	case bytes.Contains(errBody, []byte("does not support thinking")):
+		return true
+	case bytes.Contains(errBody, []byte("Unexpected reasoning effort")):
+		return true
+	}
+	return false
 }
 
 // doPost performs one round-trip, mapping status into the typed cloud errors
