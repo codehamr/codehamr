@@ -23,14 +23,15 @@ var DefaultSystemPrompt string
 const DirName = ".codehamr"
 
 // defaultContextSize is the local profile's packing budget and the floor
-// Bootstrap coerces a bogus/missing context_size to. It must match what a stock
-// local server actually honors, NOT the model's theoretical max: Ollama's /v1
-// shim reports no X-Context-Window, so codehamr packs to this value blind: set
-// it too high and the server silently front-truncates the prompt, dropping the
-// embedded system prompt and early tool results with no error. 32k is the safe
-// stock-Ollama tier and the seeded local model's native window. Users who raise
-// their server's num_ctx (OLLAMA_CONTEXT_LENGTH; see README) lift this to match.
-const defaultContextSize = 32768
+// Bootstrap coerces a bogus/missing context_size to. It is the seeded local
+// model's full native window (qwen3.8:27b: 262144 = 256k), so a correctly
+// provisioned server gets the whole thing without hand-tuning. Ollama's /v1
+// shim reports no X-Context-Window, so codehamr packs to this value blind: on a
+// server configured for less, the prompt is silently front-truncated, dropping
+// the embedded system prompt and early tool results with no error. Users whose
+// server honors less (stock Ollama defaults far lower; see README) lower this
+// to match their num_ctx / OLLAMA_CONTEXT_LENGTH.
+const defaultContextSize = 262144
 
 // cloudProfileNames are profiles whose context_size the server sets via the
 // X-Context-Window header. We leave their on-disk context_size empty:
@@ -55,7 +56,7 @@ func IsCloudProfile(name string) bool {
 // tune what the server already manages.
 var managedProfiles = map[string]Profile{
 	"local": {
-		LLM:         "qwen3.6:27b",
+		LLM:         "qwen3.8:27b",
 		URL:         "http://localhost:11434",
 		Key:         "",
 		ContextSize: defaultContextSize,
@@ -289,9 +290,9 @@ func writeYAML(path string, v any) error {
 # Modelfile 'PARAMETER num_ctx'); too high and the server silently drops the
 # oldest messages. More VRAM lets you raise both together.
 #
-# Example: qwen3.6:27b can do 256k, but only if your server is told to. Start
-# Ollama with OLLAMA_CONTEXT_LENGTH=262144, then set 'context_size: 262144' here.
-# The 32768 default is the safe stock-Ollama tier that works without that step.
+# The seeded 262144 is qwen3.8:27b's full 256k window; your server only delivers
+# it if told to (start Ollama with OLLAMA_CONTEXT_LENGTH=262144). Serving less?
+# Lower 'context_size' here to match.
 
 `)
 	// Write to a sibling temp then rename over config.yaml. Rename is atomic

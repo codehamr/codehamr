@@ -331,8 +331,10 @@ func (m *Model) activeContextSize() int {
 }
 
 // defaultPackFallback is the conservative window used until the server reports
-// a real value. Matches config.defaultContextSize so cloud profiles behave like
-// a fresh local one until X-Context-Window arrives on the next response.
+// a real value. Deliberately small (not config.defaultContextSize, which is the
+// local model's full native window): a cloud profile packs blind until
+// X-Context-Window arrives on the next response, and under-packing one turn
+// costs history while over-packing it is a 400 or a silent truncation.
 const defaultPackFallback = 32768
 
 // resizeSettleDelay debounces width-resize bursts: longer than typical drag
