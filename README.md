@@ -126,8 +126,8 @@ There's a waitlist at [codehamr.com](https://codehamr.com). HamrPass only gets b
 
 <a href="https://www.star-history.com/?repos=codehamr%2Fcodehamr&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&theme=dark&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&legend=top-left&sealed_token=6P3CnwM2stM-KalhlTKgaXMxdBnP-JQHBBhYU6C0k1TyvkDdkmIXXl-jW_tvF8dQEKU8Yv1pwHNvG289f6f7Q3a_cSSoI25lX-xYVvTaoFNHV812AGmkEnmttmA6vucJoZ_Pv8ZJIoXhmkq8hwvQ7RAFRQZCF1JD1g35Sh0_mcFJzchewGwZnCA8MVjm" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&theme=dark&legend=top-left&sealed_token=LHOKnrUccfmjSzVC5hy4LHMPMYZ-Ojk4iob73chlvS6wVul8kNHFaOHY_R2uiyTaNX2WuuMcyKEt35oSS1r_yYftwOpRMw6abOb7YlV6IhFyQtYgzo3VZDfb48WF8tqVUqc1NyFMsXF_KTPDU21xxziuogMoP-ABBCQYnmo7oaLWlkB8M5sLGoa7M_dV" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&legend=top-left&sealed_token=LHOKnrUccfmjSzVC5hy4LHMPMYZ-Ojk4iob73chlvS6wVul8kNHFaOHY_R2uiyTaNX2WuuMcyKEt35oSS1r_yYftwOpRMw6abOb7YlV6IhFyQtYgzo3VZDfb48WF8tqVUqc1NyFMsXF_KTPDU21xxziuogMoP-ABBCQYnmo7oaLWlkB8M5sLGoa7M_dV" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=codehamr/codehamr&type=date&legend=top-left&sealed_token=LHOKnrUccfmjSzVC5hy4LHMPMYZ-Ojk4iob73chlvS6wVul8kNHFaOHY_R2uiyTaNX2WuuMcyKEt35oSS1r_yYftwOpRMw6abOb7YlV6IhFyQtYgzo3VZDfb48WF8tqVUqc1NyFMsXF_KTPDU21xxziuogMoP-ABBCQYnmo7oaLWlkB8M5sLGoa7M_dV" />
  </picture>
 </a>
