@@ -61,8 +61,8 @@ func TestChatStreamsContent(t *testing.T) {
 	if !strings.Contains(gotBody, `"model":"test-model"`) {
 		t.Fatalf("model missing from request: %s", gotBody)
 	}
-	if !strings.Contains(gotBody, `"reasoning_effort":"high"`) {
-		t.Fatalf("reasoning_effort must default to 'high' (server-driven fallback only): %s", gotBody)
+	if !strings.Contains(gotBody, `"reasoning_effort":"medium"`) {
+		t.Fatalf("reasoning_effort must default to 'medium' (decode is the serialised critical path): %s", gotBody)
 	}
 
 	var content strings.Builder
@@ -1184,5 +1184,170 @@ func TestProbeDoesNotRetry(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("probe attempts = %d, want 1", attempts)
+	}
+}
+
+// TestChatParallelToolCallsSharedIndex: a backend that emits index 0 for every
+// call in a parallel batch must still resolve N distinct calls. Concatenating
+// their argument bodies into one slot yields a single _parse_error, which is
+// how a batched round degrades into a stalled turn on exactly the local
+// servers this project targets.
+func TestChatParallelToolCallsSharedIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\":\"b.go\"}"}}]}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":9}}`,
+		})
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", "")
+	var calls []chmctx.ToolCall
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventToolCall {
+			calls = append(calls, *e.ToolCall)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("shared-index parallel batch resolved %d calls, want 2: %+v", len(calls), calls)
+	}
+	for i, want := range []string{"a.go", "b.go"} {
+		if got, _ := calls[i].Arguments["path"].(string); got != want {
+			t.Fatalf("call %d path = %q, want %q (args: %+v)", i, got, want, calls[i].Arguments)
+		}
+	}
+}
+
+// TestChatMidStreamDropIsReplayable / ...ServerErrorIsNot: the TUI replays a
+// dropped socket but must never replay the server's own refusal, which would
+// repeat forever.
+func TestChatMidStreamDropIsReplayable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		srv2, _, _ := w.(http.Hijacker).Hijack()
+		srv2.Close() // drop the socket mid-stream
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", "")
+	var errEvt *Event
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			errEvt = &e
+		}
+	}
+	if errEvt == nil {
+		t.Fatal("expected an EventError for a dropped stream")
+	}
+	if !errEvt.MidStream {
+		t.Fatalf("a drop after a delivered frame must be replayable: %v", errEvt.Err)
+	}
+}
+
+func TestChatServerStreamErrorIsNotReplayable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"content":"partial"}}]}`,
+			`{"error":{"message":"context length exceeded"}}`,
+		})
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", "")
+	var errEvt *Event
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			errEvt = &e
+		}
+	}
+	if errEvt == nil {
+		t.Fatal("expected an EventError for a server-reported stream error")
+	}
+	if errEvt.MidStream {
+		t.Fatal("a server-reported error must never be replayed: it would repeat forever")
+	}
+}
+
+// TestChatParallelToolCallsSharedIndexFragmented: the shared-index case with
+// FRAGMENTED arguments. The continuation fragments carry the shared index and
+// no id, so they must reach the call currently being streamed, not the earlier
+// one parked under it. Getting this backwards silently welds one call's
+// arguments onto another - valid JSON in, garbage out.
+func TestChatParallelToolCallsSharedIndexFragmented(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b.go\"}"}}]}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":9}}`,
+		})
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", "")
+	var calls []chmctx.ToolCall
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventToolCall {
+			calls = append(calls, *e.ToolCall)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("fragmented shared-index batch resolved %d calls, want 2: %+v", len(calls), calls)
+	}
+	for i, want := range []string{"a.go", "b.go"} {
+		if got, _ := calls[i].Arguments["path"].(string); got != want {
+			t.Fatalf("call %d (id %s) path = %q, want %q", i, calls[i].ID, got, want)
+		}
+	}
+	if calls[0].ID != "c1" || calls[1].ID != "c2" {
+		t.Fatalf("emission order lost: got ids %s, %s", calls[0].ID, calls[1].ID)
+	}
+}
+
+// TestKeepaliveDoesNotCollapseThePrefillWindow: a proxy that emits one comment
+// or blank line at 200 OK (LiteLLM/nginx SSE shims, OpenRouter's ": OPENROUTER
+// PROCESSING") is liveness, not output. Treating it as output would (a) swap the
+// long prefill window for the short inter-frame one while the model is still
+// prefilling, and (b) mark the resulting DETERMINISTIC prefill stall as a
+// replayable mid-stream drop - so the TUI would replay the same doomed prefill
+// twice more before showing the user anything.
+func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		preamble string
+		want     bool
+	}{
+		{"keepalive comment then silence", ": OPENROUTER PROCESSING\n\n", false},
+		{"blank line then silence", "\n", false},
+		{"real data frame then silence", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, tc.preamble)
+				w.(http.Flusher).Flush()
+				// Go silent until the watchdog closes the body: an alive-but-mute
+				// server, which is what a prefill looks like from out here.
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+			c := New(srv.URL, "m", "")
+			c.IdleTimeout = 300 * time.Millisecond
+			var errEvt *Event
+			for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+				if e.Kind == EventError {
+					errEvt = &e
+				}
+			}
+			if errEvt == nil {
+				t.Fatal("expected a stall error")
+			}
+			if errEvt.MidStream != tc.want {
+				t.Fatalf("MidStream = %v, want %v (only a data frame means the model started producing): %v",
+					errEvt.MidStream, tc.want, errEvt.Err)
+			}
+		})
 	}
 }

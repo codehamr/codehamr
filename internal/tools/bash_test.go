@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -295,10 +296,39 @@ func TestRunRawSurfacesTruncatedToolArgs(t *testing.T) {
 		if strings.Contains(got, "empty path") || strings.Contains(got, "empty command") {
 			t.Fatalf("%s: truncation masked as empty-arg error: %q", name, got)
 		}
-		for _, want := range []string{"not valid JSON", "truncated", "cat >>", "wc -c"} {
+		for _, want := range []string{"not valid JSON", "truncated", "append true", "wc -c"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("%s: message missing %q: %q", name, want, got)
 			}
 		}
+	}
+}
+
+// TestExecuteSpillsOversizeOutput: when Truncate drops the middle of a big
+// result, the full bytes must land in a file the model can grep. Without it
+// the only way back to the dropped middle is re-running the command that
+// produced it, which is the round-trip this exists to remove.
+func TestExecuteSpillsOversizeOutput(t *testing.T) {
+	msg := Execute(context.Background(), chmctx.ToolCall{
+		Name:      BashName,
+		Arguments: map[string]any{"cmd": "seq 1 200000"},
+	})
+	if !strings.Contains(msg.Content, "───── truncated") {
+		t.Fatalf("expected a truncated result, got %d bytes", len(msg.Content))
+	}
+	i := strings.Index(msg.Content, "output saved to ")
+	if i < 0 {
+		t.Fatalf("truncated result did not name a spill file: %q", msg.Content[len(msg.Content)-200:])
+	}
+	path := msg.Content[i+len("output saved to "):]
+	path = strings.TrimSpace(strings.SplitN(path, " ", 2)[0])
+	t.Cleanup(func() { os.Remove(path) })
+	spilled, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("spill file unreadable: %v", err)
+	}
+	// The dropped middle must be recoverable from the spill.
+	if !strings.Contains(string(spilled), "\n100000\n") {
+		t.Fatalf("spill file is missing the dropped middle (%d bytes)", len(spilled))
 	}
 }

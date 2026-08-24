@@ -142,6 +142,12 @@ type Event struct {
 	PromptTokens int
 	Elapsed      time.Duration
 	Err          error
+	// MidStream marks an EventError raised after the stream had already
+	// delivered at least one frame and that is not the server's own diagnosis:
+	// a dropped socket rather than a refusal. History is only written on
+	// EventDone, so the TUI can re-issue the identical request without
+	// duplicating anything. See Model.replayStream.
+	MidStream bool
 }
 
 type EventKind int
@@ -191,6 +197,12 @@ const (
 // straight past; runaway/failure nudges and Ctrl+C own that. CODEHAMR_IDLE_TIMEOUT
 // overrides the default (Go duration like "90m", or a bare number = seconds).
 const streamIdleTimeout = time.Hour
+
+// streamInterFrameTimeout bounds the gap between two SSE frames once the stream
+// is live. A server mid-answer emits continuously; minutes of silence there is a
+// dead connection, not a slow model. Kept well clear of the prefill window
+// above, which is the wait that legitimately runs long.
+const streamInterFrameTimeout = 5 * time.Minute
 
 // idleTimeoutFromEnv resolves CODEHAMR_IDLE_TIMEOUT to a duration, falling back
 // to streamIdleTimeout when unset or unparseable. Accepts a Go duration string
@@ -299,7 +311,9 @@ func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 }
 
 // Chat streams an assistant response on the returned channel, closing it when
-// the stream ends. Reasoning runs at `high` effort by default; if the server
+// the stream ends. Reasoning runs at `medium` effort: decode is the serialised
+// critical path of every round, and `high` bought deliberation the agent loop
+// already gets from seeing each tool result. If the server
 // rejects the tools + reasoning_effort combo (newer OpenAI models do), postChat
 // drops reasoning_effort for this Client's lifetime so the model still works,
 // with tools but no reasoning. Staying on chat-completions is the product line;
@@ -345,12 +359,22 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	// stops sending after 200 OK would wedge readSSE forever. Closing the body
 	// from the timer unblocks the in-flight Read; readSSE then returns and we
 	// surface a stall. parent isn't cancelled, so (unlike Ctrl+C) the error
-	// reaches the user. readSSE resets the timer on every frame.
+	// reaches the user.
+	//
+	// TWO windows, not one. The silent pre-first-token prefill scales with the
+	// packed context and can legitimately run many minutes, so it gets the long
+	// window. Every window after the first covers a LIVE stream, where minutes
+	// of silence means a dead socket, so readSSE's onFrame swaps in the short
+	// one. Arming both at the prefill length is what let a dropped connection
+	// cost a full hour of an unattended run.
 	idle := c.IdleTimeout
 	if idle <= 0 {
 		idle = streamIdleTimeout
 	}
-	var stalled atomic.Bool
+	interFrame := min(idle, streamInterFrameTimeout)
+	var stalled, streaming atomic.Bool
+	window := atomic.Int64{}
+	window.Store(int64(idle))
 	watchdog := time.AfterFunc(idle, func() {
 		stalled.Store(true)
 		resp.Body.Close()
@@ -358,13 +382,25 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 
 	budget := cloud.FromHeaders(resp.Header)
 	ctxWindow := cloud.ContextWindowFromHeaders(resp.Header)
-	final, tokens, promptTokens, err := readSSE(parent, resp.Body, budget, out, func() { watchdog.Reset(idle) })
+	final, tokens, promptTokens, err := readSSE(parent, resp.Body, budget, out, func(output bool) {
+		if output {
+			streaming.Store(true)
+			window.Store(int64(interFrame))
+		}
+		watchdog.Reset(time.Duration(window.Load()))
+	})
 	watchdog.Stop()
 	if err != nil {
 		if stalled.Load() {
-			err = fmt.Errorf("the server stopped sending data (no stream activity for %s)", idle)
+			err = fmt.Errorf("the server stopped sending data (no stream activity for %s)", time.Duration(window.Load()))
 		}
-		sendEvent(parent, out, Event{Kind: EventError, Err: err})
+		// MidStream marks a drop the TUI may transparently replay. Gated on a
+		// frame having actually arrived: a PREFILL stall is deterministic, so
+		// replaying it just re-pays the same wait. A server-reported stream
+		// error is its own diagnosis ("context length exceeded") and would
+		// replay forever, so it never qualifies either.
+		var sse *serverStreamError
+		sendEvent(parent, out, Event{Kind: EventError, Err: err, MidStream: streaming.Load() && !errors.As(err, &sse)})
 		return
 	}
 	sendEvent(parent, out, Event{
@@ -400,7 +436,7 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 		Tools:           tools,
 		Stream:          true,
 		StreamOptions:   &streamOptions{IncludeUsage: true},
-		ReasoningEffort: "high",
+		ReasoningEffort: "medium",
 	})
 	if err != nil {
 		return nil, &Event{Kind: EventError, Err: err, Budget: budget}
@@ -433,8 +469,9 @@ func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Respo
 // Each signal is the provider's own phrase, never a lone generic word, so an
 // unrelated 400 that merely mentions "thinking" can't latch reasoning off for
 // the Client's whole life. Dropping the field is the right remedy for all
-// three: the server then applies its own default (on the Qwen3.8 scale that is
-// xhigh, i.e. more reasoning than we asked for, not less).
+// three, but note what it costs: the server then applies its own default (on
+// the Qwen3.8 scale that is xhigh, i.e. MORE reasoning than we asked for, not
+// less). Dropping the field is a compatibility fix, never a way to think less.
 func rejectsReasoning(errBody []byte) bool {
 	switch {
 	case bytes.Contains(errBody, []byte("not support")) &&
@@ -550,7 +587,16 @@ func errorMessageFromBody(b []byte) string {
 // message (content + accumulated tool calls), the server completion and prompt
 // token counts, and any scanner error. parent is threaded through so sends
 // abort on cancellation instead of blocking on an undrained buffer.
-func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, out chan<- Event, onFrame func()) (*chmctx.Message, int, int, error) {
+// serverStreamError is an error the SERVER reported inside the SSE stream, as
+// opposed to a transport failure. Typed so the replay path can tell the two
+// apart: resending a request the server already refused just repeats the refusal.
+type serverStreamError struct{ msg string }
+
+func (e *serverStreamError) Error() string {
+	return "the server reported a stream error: " + e.msg
+}
+
+func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, out chan<- Event, onFrame func(output bool)) (*chmctx.Message, int, int, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1<<16), 4<<20)
 
@@ -563,11 +609,18 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 	)
 
 	for scanner.Scan() {
-		// Any line (data, blank separator, or ": keepalive" comment) is
-		// liveness; reset the idle watchdog before inspecting it.
-		onFrame()
+		// Any line (data, blank separator, or ": keepalive" comment) is liveness
+		// and rearms the idle watchdog. Only a `data:` line means the model has
+		// actually started PRODUCING, which is the separate question of whether
+		// the long prefill window is over: a proxy that emits one comment at
+		// 200 OK (LiteLLM/nginx SSE shims, OpenRouter's ": OPENROUTER
+		// PROCESSING") must not collapse the prefill window to the inter-frame
+		// one, nor make the resulting deterministic prefill stall look like a
+		// replayable mid-stream drop.
 		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+		isData := bytes.HasPrefix(line, []byte("data:"))
+		onFrame(isData)
+		if len(line) == 0 || !isData {
 			continue
 		}
 		payload := bytes.TrimSpace(line[len("data:"):])
@@ -583,7 +636,7 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 			if msg == "" {
 				msg = string(payload)
 			}
-			return nil, 0, 0, fmt.Errorf("the server reported a stream error: %s", msg)
+			return nil, 0, 0, &serverStreamError{msg: msg}
 		}
 		for _, choice := range sc.Choices {
 			if !dispatchDelta(parent, choice.Delta, budget, &fullContent, slots, &order, out) {
@@ -639,7 +692,33 @@ func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetSta
 		}
 	}
 	for _, tc := range d.ToolCalls {
+		// Parked slots live at negative keys (below); a wire index is
+		// non-negative in any conforming backend, so normalise rather than let
+		// a malformed one land on a parked call and corrupt its arguments.
+		if tc.Index < 0 {
+			tc.Index = 0
+		}
 		slot, existed := slots[tc.Index]
+		// A backend that emits the same index for every call in a parallel batch
+		// would otherwise concatenate N argument bodies into one slot and
+		// resolve to a single _parse_error. A fragment carrying a DIFFERENT
+		// non-empty id than the slot already holds is a new call. Park the
+		// finished one under a negative key - wire indices are non-negative, so
+		// a parked key can never collide - and let the NEW call keep tc.Index,
+		// because the argument fragments that follow carry that same index and
+		// no id, and must reach the call currently being streamed. Its place in
+		// `order` moves with it, so emission order survives.
+		if existed && tc.ID != "" && slot.id != "" && slot.id != tc.ID {
+			parked := -len(*order) - 1
+			slots[parked] = slot
+			for i, k := range *order {
+				if k == tc.Index {
+					(*order)[i] = parked
+					break
+				}
+			}
+			existed = false
+		}
 		if !existed {
 			slot = &toolSlot{}
 			slots[tc.Index] = slot

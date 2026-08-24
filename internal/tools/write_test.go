@@ -14,7 +14,7 @@ func TestWriteFileHappy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hello.txt")
 	content := "line one\nline two with 'quotes' and $dollar and `backticks`\n"
-	s := WriteFile(path, content)
+	s := WriteFile(path, content, false)
 	if !strings.Contains(s, "wrote") || !strings.Contains(s, "hello.txt") {
 		t.Fatalf("status wrong: %q", s)
 	}
@@ -30,7 +30,7 @@ func TestWriteFileHappy(t *testing.T) {
 func TestWriteFileCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "deep", "file.txt")
-	s := WriteFile(path, "x")
+	s := WriteFile(path, "x", false)
 	if !strings.Contains(s, "wrote 1 bytes") {
 		t.Fatalf("status wrong: %q", s)
 	}
@@ -40,7 +40,7 @@ func TestWriteFileCreatesParentDirs(t *testing.T) {
 }
 
 func TestWriteFileEmptyPath(t *testing.T) {
-	if WriteFile("", "x") != "(empty path)" {
+	if WriteFile("", "x", false) != "(empty path)" {
 		t.Fatal("empty path handling wrong")
 	}
 }
@@ -56,7 +56,7 @@ func TestWriteFileMkdirErrorWhenParentIsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// blocker is a file, so MkdirAll(blocker/sub) must fail.
-	got := WriteFile(filepath.Join(blocker, "sub", "out.txt"), "data")
+	got := WriteFile(filepath.Join(blocker, "sub", "out.txt"), "data", false)
 	if !strings.HasPrefix(got, "(mkdir error:") {
 		t.Fatalf("expected (mkdir error: ...) string, got %q", got)
 	}
@@ -71,7 +71,7 @@ func TestWriteFileWriteErrorWhenTargetIsDir(t *testing.T) {
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got := WriteFile(target, "data")
+	got := WriteFile(target, "data", false)
 	if !strings.HasPrefix(got, "(write error:") {
 		t.Fatalf("expected (write error: ...) string, got %q", got)
 	}
@@ -172,5 +172,71 @@ func TestInlineStatusWriteFile(t *testing.T) {
 	})
 	if !strings.HasPrefix(s, "▶ write_file: /tmp/foo.txt") {
 		t.Fatalf("bad inline status: %q", s)
+	}
+}
+
+// TestWriteFileAppendCoercesStringFlag: a weak backend emitting `"append":
+// "true"` must still APPEND. A failed bool assertion would silently overwrite,
+// destroying the earlier parts of a chunked write behind a success-shaped
+// "wrote N bytes" - the worst possible outcome on the exact recovery path
+// append exists for.
+func TestWriteFileAppendCoercesStringFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "parts.txt")
+	for _, appendArg := range []any{nil, "true", true} {
+		args := map[string]any{"path": path, "content": "part\n"}
+		if appendArg != nil {
+			args["append"] = appendArg
+		}
+		Execute(context.Background(), chmctx.ToolCall{Name: WriteFileName, Arguments: args})
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "part\npart\npart\n" {
+		t.Fatalf("append lost a part: got %q", got)
+	}
+}
+
+// TestWriteFileAppendCoercesEveryTruthyShape: `append` reaches us through a
+// weak local tool-call parser, so it arrives as a bool, as the JSON number 1
+// (float64 after decoding), or as "True"/"true"/"1". Every one of those must
+// APPEND. Missing any shape silently OVERWRITES behind a success-shaped "wrote
+// N bytes" - destroying the earlier parts of a chunked write, or a pre-existing
+// user file, with nothing in the transcript to show for it.
+func TestWriteFileAppendCoercesEveryTruthyShape(t *testing.T) {
+	for _, truthy := range []any{true, "true", "True", "TRUE", "1", float64(1)} {
+		path := filepath.Join(t.TempDir(), "parts.txt")
+		Execute(context.Background(), chmctx.ToolCall{
+			Name:      WriteFileName,
+			Arguments: map[string]any{"path": path, "content": "one\n"},
+		})
+		Execute(context.Background(), chmctx.ToolCall{
+			Name:      WriteFileName,
+			Arguments: map[string]any{"path": path, "content": "two\n", "append": truthy},
+		})
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "one\ntwo\n" {
+			t.Fatalf("append=%#v (%T) overwrote instead of appending: file is %q", truthy, truthy, got)
+		}
+	}
+	// And the falsy shapes must still overwrite.
+	for _, falsy := range []any{false, "false", float64(0)} {
+		path := filepath.Join(t.TempDir(), "parts.txt")
+		Execute(context.Background(), chmctx.ToolCall{
+			Name:      WriteFileName,
+			Arguments: map[string]any{"path": path, "content": "one\n"},
+		})
+		Execute(context.Background(), chmctx.ToolCall{
+			Name:      WriteFileName,
+			Arguments: map[string]any{"path": path, "content": "two\n", "append": falsy},
+		})
+		got, _ := os.ReadFile(path)
+		if string(got) != "two\n" {
+			t.Fatalf("append=%#v (%T) should overwrite, file is %q", falsy, falsy, got)
+		}
 	}
 }

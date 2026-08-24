@@ -50,15 +50,16 @@ const (
 	ToolOutputCap = 6000
 	ToolHeadTail  = 2000
 	// FixedSystem reserves budget for the embedded prompt + working-dir anchor
-	// (see tui.buildSystem). PROMPT_SYS.md + anchor is ~4100 tokens (the
-	// verification-honesty ledger and trace-read fallback grew it, then the
-	// git/secrets discipline lines; the web-search and truncation-note trims
-	// shrank it); the buffer to 4200 keeps prompt edits and long project paths
-	// from silently over-budgeting small-ctx profiles. A test pins this
-	// against the live prompt; bump here when it fails, never relax the
-	// assertion.
-	FixedSystem = 4200
-	FixedTools  = 1500
+	// (see tui.buildSystem), FixedTools for the four tool schemas. PROMPT_SYS.md
+	// + anchor is ~1340 tokens since the incident runbooks (the browser ladder,
+	// the write-chunking ritual) came out of the always-on prompt; the schemas
+	// are ~900 with read_file's offset/limit and write_file's append. Both keep a
+	// buffer for prompt edits and long project paths, and both are pinned by a
+	// test against the live values: bump here when it fails, never relax the
+	// assertion. Every token reserved here is a token of history that small-ctx
+	// profiles cannot use, which is why these track reality rather than sit high.
+	FixedSystem = 1600
+	FixedTools  = 1100
 )
 
 // budgetHeadroomDivisor cuts the history budget by 1/this (10%) below the

@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -77,7 +79,11 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	if err != nil {
 		switch {
 		case ctxT.Err() == context.DeadlineExceeded:
-			return s + fmt.Sprintf("\n(timeout after %s)", timeout)
+			// Name the recovery in the result string rather than the system
+			// prompt: a foreground server is the common cause and it never
+			// exits on its own, so re-firing it with a bigger timeout just
+			// burns the turn again.
+			return s + fmt.Sprintf("\n(timeout after %s - if this command never exits on its own it is a server or watcher: re-run it backgrounded, `cmd >/tmp/x.log 2>&1 & echo $! >/tmp/x.pid`, then poll the log. If it was legitimately slow, re-issue it once with a larger timeout_seconds.)", timeout)
 		case parent.Err() == context.Canceled || ctxT.Err() == context.Canceled:
 			// User Ctrl+C; name it rather than leak "signal: killed" noise.
 			return s + "\n(cancelled)"
@@ -101,7 +107,7 @@ func BashSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        BashName,
-			"description": "Run a shell command in the user's environment. Combined stdout+stderr is returned. Use targeted commands (grep, head, tail) to avoid the 6k truncation.",
+			"description": "Run a shell command in the user's environment. Combined stdout+stderr is returned; a non-zero exit comes back as `(exit: N)`, not an error. Use targeted commands (grep, head, tail) to keep output small. Independent commands belong in one message together with any other independent calls.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -111,7 +117,7 @@ func BashSchema() map[string]any {
 					},
 					"timeout_seconds": map[string]any{
 						"type":        "integer",
-						"description": "Optional per call timeout in seconds. Default 120, hard capped at 3600. Raise for commands you expect to run long (pytest on large suites, docker build, DB migrations).",
+						"description": "Optional per call timeout in seconds. Default 600, hard capped at 3600. Raise for commands you expect to run longer (large test suites, docker build, DB migrations). If a call comes back `(timeout after ...)` and the command was legitimately slow, re-issue it once with a larger value - raising the timeout is a different call, not a repeat.",
 					},
 				},
 				"required": []string{"cmd"},
@@ -124,12 +130,81 @@ func BashSchema() map[string]any {
 // to be appended to the conversation as a `tool` message.
 func Execute(parent context.Context, call chmctx.ToolCall) chmctx.Message {
 	raw := runRaw(parent, call)
+	content := chmctx.Truncate(raw)
+	// Truncate keeps head+tail and drops the middle, which is exactly where a
+	// failing assertion or a stack trace sits. Spill the whole result to a file
+	// and name it, so recovering the dropped middle is one grep instead of
+	// re-running the command that produced it with narrower flags.
+	if len(content) < len(raw) {
+		if path := spillOutput(raw); path != "" {
+			content += fmt.Sprintf("\n(full %d-byte output saved to %s - grep or read that file instead of re-running the command)", len(raw), path)
+		}
+	}
 	return chmctx.Message{
 		Role:       chmctx.RoleTool,
-		Content:    chmctx.Truncate(raw),
+		Content:    content,
 		ToolCallID: call.ID,
 		ToolName:   call.Name,
 	}
+}
+
+// spillOutput writes an over-budget tool result to a temp file and returns its
+// path. Best effort: on failure the model keeps the truncated view it would
+// have had anyway. Cleanup belongs to the OS tmp reaper - each file is already
+// bounded by bash's own capture ceiling.
+func spillOutput(s string) string {
+	f, err := os.CreateTemp("", "codehamr-out-*.txt")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if _, err := f.WriteString(s); err != nil {
+		os.Remove(f.Name())
+		return ""
+	}
+	return f.Name()
+}
+
+// intArg coerces a numeric tool argument. Weak local tool-call parsers emit
+// integers as JSON numbers or as bare strings; both must mean the same thing,
+// or read_file's continuation note ("continue with offset=451") silently
+// re-reads the head forever and the model loops on a file it can never finish.
+func intArg(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case string:
+		v = strings.TrimSpace(v)
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		// "451.0": the same integer wearing a float's clothes. Dropping it to 0
+		// hands read_file the head window again, with the same continuation note
+		// - a success every time, so no failure streak can ever form.
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return int(f)
+		}
+	}
+	return 0
+}
+
+// boolArg coerces a boolean tool argument, for the same reason as intArg. A
+// string "true" silently read as false would make write_file OVERWRITE where
+// append was asked for, destroying the earlier parts of a chunked write behind
+// a success-shaped result.
+func boolArg(args map[string]any, key string) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case float64:
+		// `"append": 1`. Every JSON number decodes to float64, and a model that
+		// has just been told to "send the next part with append true" writing 1
+		// is common enough that missing it silently truncated the file.
+		return v != 0
+	case string:
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	return false
 }
 
 func runRaw(parent context.Context, call chmctx.ToolCall) string {
@@ -142,22 +217,22 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 	if msg, ok := call.Arguments["_parse_error"].(string); ok {
 		return fmt.Sprintf("(tool arguments were not valid JSON: %s, most likely the "+
 			"content was too large and the server truncated the call at its output-token "+
-			"limit. Do NOT retry the same whole-file write. Build the file in chunks with "+
-			"bash heredoc append: `cat > path <<'EOF'` … `EOF` for the first part, then "+
-			"repeated `cat >> path <<'EOF'` … `EOF` for each next part, then verify with "+
-			"`wc -c path`.)", msg)
+			"limit. Do NOT retry the same whole-file write. Send it in parts of at most "+
+			"~200 lines: write_file with the first part, then write_file with append true "+
+			"for each following part, then verify with `wc -c path`.)", msg)
 	}
 	switch call.Name {
 	case BashName:
 		cmd, _ := call.Arguments["cmd"].(string)
-		// Default 2m, overridable per call up to 1h. Clamp seconds BEFORE the
-		// Duration multiply: 1e18 would overflow int64 into a negative duration,
-		// and 0.5 would truncate to 0 and cancel before the shell runs, so
-		// floor at 1.
-		timeout := 2 * time.Minute
-		if secs, ok := call.Arguments["timeout_seconds"].(float64); ok && secs > 0 {
-			secs = min(max(secs, 1), maxBashTimeoutSeconds)
-			timeout = time.Duration(secs) * time.Second
+		// Default 10m, overridable per call up to 1h. The old 2m default made
+		// every legitimately slow command (a real test suite, a docker build,
+		// an npm install) run twice: once to hit the deadline, once with a
+		// bigger timeout. Clamp seconds BEFORE the Duration multiply: 1e18
+		// would overflow int64 into a negative duration, and 0.5 would truncate
+		// to 0 and cancel before the shell runs, so floor at 1.
+		timeout := 10 * time.Minute
+		if secs := intArg(call.Arguments, "timeout_seconds"); secs > 0 {
+			timeout = time.Duration(min(max(secs, 1), maxBashTimeoutSeconds)) * time.Second
 		}
 		return Bash(parent, cmd, timeout)
 	case WriteFileName:
@@ -170,7 +245,7 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 		if !ok {
 			return `(missing content argument: the call carried no string "content", refusing to write - resend with the full content; an intentionally empty file needs an explicit "content": "")`
 		}
-		return WriteFile(path, content)
+		return WriteFile(path, content, boolArg(call.Arguments, "append"))
 	case EditFileName:
 		path, _ := call.Arguments["path"].(string)
 		oldString, _ := call.Arguments["old_string"].(string)
@@ -184,7 +259,7 @@ func runRaw(parent context.Context, call chmctx.ToolCall) string {
 		return EditFile(path, oldString, newString)
 	case ReadFileName:
 		path, _ := call.Arguments["path"].(string)
-		return ReadFile(path)
+		return ReadFile(path, intArg(call.Arguments, "offset"), intArg(call.Arguments, "limit"))
 	default:
 		return fmt.Sprintf("(unknown tool: %s)", call.Name)
 	}

@@ -231,7 +231,18 @@ func Apply(ctx context.Context, execPath string) error {
 // more launch.
 func CleanupOld(execPath string) {
 	_ = os.Remove(execPath + ".old")
-	matches, err := filepath.Glob(filepath.Join(filepath.Dir(execPath), ".codehamr-update-*"))
+	// Interrupted downloads, plus the tool-output spill files tools.Execute
+	// writes when a result outgrows the context budget. A long unattended run
+	// can strand hundreds of megabytes of those, and a devcontainer's /tmp has
+	// no reaper of its own.
+	sweepOrphans(filepath.Join(filepath.Dir(execPath), ".codehamr-update-*"))
+	sweepOrphans(filepath.Join(os.TempDir(), "codehamr-out-*.txt"))
+}
+
+// sweepOrphans deletes files matching pattern that nothing has touched for
+// orphanSweepAge, so a live session's files are never pulled out from under it.
+func sweepOrphans(pattern string) {
+	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return
 	}

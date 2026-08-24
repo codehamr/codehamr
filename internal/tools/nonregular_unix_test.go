@@ -37,7 +37,7 @@ func mkfifo(t *testing.T) string {
 func TestReadFileRefusesNonRegular(t *testing.T) {
 	path := mkfifo(t)
 	done := make(chan string, 1)
-	go func() { done <- ReadFile(path) }()
+	go func() { done <- ReadFile(path, 0, 0) }()
 	select {
 	case got := <-done:
 		if !strings.Contains(got, "not a regular file") {
@@ -53,7 +53,7 @@ func TestReadFileRefusesNonRegular(t *testing.T) {
 func TestWriteFileRefusesNonRegular(t *testing.T) {
 	path := mkfifo(t)
 	done := make(chan string, 1)
-	go func() { done <- WriteFile(path, "data") }()
+	go func() { done <- WriteFile(path, "data", false) }()
 	select {
 	case got := <-done:
 		if !strings.Contains(got, "not a regular file") {

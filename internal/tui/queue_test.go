@@ -216,6 +216,8 @@ func TestQueueWaitsForVerifyNudge(t *testing.T) {
 	m.installTurnContext()
 	m.phase = phaseStreaming
 	m.toolRounds = verifyNudgeMinRounds // substantial → verify nudge fires
+	m.llmRounds = verifyNudgeMinRounds
+	m.turnActed = true // the turn wrote something; a read-only turn is exempt
 	m.stream = make(chan llm.Event)
 	m.history = []chmctx.Message{
 		{Role: chmctx.RoleUser, Content: "build it"},

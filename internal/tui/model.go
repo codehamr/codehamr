@@ -227,14 +227,37 @@ type Model struct {
 	// Runaway-iteration nudge, sibling to the failure nudge. A 30B model can
 	// loop on plausible *non-failing* calls (re-read, re-grep, re-list) forever;
 	// the failure streak only catches repeated *failures*, so that hole stayed
-	// open. toolRounds counts tool calls dispatched this turn (reset in endTurn);
-	// at maxToolRounds one soft system note asks the model to self-assess. A
-	// nudge, never a hard yield, same contract as maybeFailureNudge.
-	// runawayNudged latches the nudge to once per turn: a multi-tool-call round
-	// can step toolRounds past maxToolRounds between drain-time checks, so a bare
-	// equality test could skip the threshold entirely.
-	toolRounds    int
-	runawayNudged bool
+	// open. toolRounds counts tool calls dispatched this turn (reset in endTurn)
+	// and gates the finish nudge; the runaway check counts llmRounds instead.
+	toolRounds int
+	// llmRounds counts assistant round-trips this turn, the honest measure of
+	// "how many times has the model gone around the loop". toolRounds counts
+	// CALLS, which the batching instruction deliberately inflates: a healthy
+	// turn batching eight reads per message would trip a call-based runaway cap
+	// in ten round-trips. Reset in endTurn.
+	llmRounds int
+	// lastRunawayRound is the llmRounds value at the last runaway nudge, so the
+	// check re-fires periodically instead of latching once. A single note at the
+	// cap left a turn past it with no supervision at all for the rest of its life.
+	lastRunawayRound int
+
+	// streamReplays counts transparent mid-stream retries this turn. A dropped
+	// socket used to kill the whole turn and wait for a human to re-prompt,
+	// which is what an unattended run cannot survive. Bounded per turn (reset in
+	// endTurn, never in applyDone) so a server dropping every round can't
+	// replay without limit.
+	streamReplays int
+	// ctxPressureWarned keeps the context-overflow banner to once per session:
+	// the condition holds for every remaining round, so an unlatched warning
+	// would paper the transcript.
+	ctxPressureWarned bool
+	// turnActed is false while a turn has done nothing but read_file - a
+	// question answered out of the codebase, with no artifact that could be
+	// falsely called green. Deliberately "not read_file" rather than
+	// "write_file or edit_file": a file built with a bash heredoc, a `sed -i`,
+	// or an `npm init` is just as much an artifact, and telling those apart
+	// would mean classifying shell commands. Reset in endTurn.
+	turnActed bool
 
 	// Empty-reply nudge, the third soft backstop. The two above catch doing-too-
 	// much; this catches a turn ending with nothing said and nothing called. A
@@ -616,6 +639,7 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 }
 
 func (m *Model) startChat() tea.Cmd {
+	m.llmRounds++
 	msgs := m.buildMessages()
 	ch := m.cli.Chat(m.turnCtx, msgs, m.buildTools())
 	m.stream = ch
@@ -667,7 +691,10 @@ func (m *Model) endTurn() {
 	m.turnCtx = nil
 	m.pending = nil
 	m.toolRounds = 0
-	m.runawayNudged = false
+	m.turnActed = false
+	m.llmRounds = 0
+	m.lastRunawayRound = 0
+	m.streamReplays = 0
 	m.emptyNudged = false
 	m.verifyNudged = false
 	// The queue-refusal hint says "send it when the turn ends"; that moment is
@@ -850,15 +877,55 @@ func (m *Model) applyDone(e llm.Event) {
 	// stays put until a run actually trips this.
 	if ctxSize := m.activeContextSize(); e.PromptTokens > 0 && e.PromptTokens >= ctxSize-ctxSize/20 {
 		dbgWritef("ctx_pressure", "prompt_tokens=%d at >=95%% of ctx=%d; real prompt has outgrown the packer's estimate, next request risks silent server-side truncation", e.PromptTokens, ctxSize)
+		// Say it out loud once. Past this band the server front-truncates
+		// silently - dropping the system prompt first - and every later round
+		// re-prefills a window it then discards. That reads to the user as "the
+		// agent got slow and stupid", with the cause visible only in a debug log
+		// they had to have enabled in advance.
+		if !m.ctxPressureWarned {
+			m.ctxPressureWarned = true
+			m.appendLine(styleError.Render(fmt.Sprintf(
+				"⚠ prompt is at %d of %d context tokens. Your server may be silently truncating it (the system prompt goes first). Lower context_size in .codehamr/config.yaml to match what the server really serves, or /clear.",
+				e.PromptTokens, ctxSize)))
+		}
 	}
 	m.flushStreaming()
 }
 
+// maxStreamReplays bounds transparent mid-stream retries per turn. Two is
+// enough to ride out a flaky proxy without letting a server that drops every
+// round spin forever; past it the error surfaces as it always did.
+const maxStreamReplays = 2
+
 // applyError unwinds the turn on a stream error: preserve content streamed
 // before the error (so the user keeps failure context), emit the one-line hint,
 // drop the pending queue, reset turn state.
+//
+// Unless the drop is replayable. llm sets MidStream for a socket that died
+// after delivering at least one frame and that is not the server's own refusal.
+// Only applyDone writes an assistant message to history, so a round that never
+// reached EventDone left history untouched: re-issuing the identical request
+// duplicates nothing. Discard this round's partial buffers first - they are
+// display and queue state, not context - and go again. Without this, one
+// transient drop three hours into an unattended run ends it and waits for a
+// human.
 func (m *Model) applyError(e llm.Event) tea.Cmd {
 	dbgWritef("error", "%v", e.Err)
+	if e.MidStream && m.phase.active() && m.streamReplays < maxStreamReplays {
+		m.streamReplays++
+		dbgWritef("replay", "mid-stream drop, replaying request (%d/%d): %v", m.streamReplays, maxStreamReplays, e.Err)
+		m.streaming.Reset()
+		m.streamingEstimate = 0
+		m.reasoning.Reset()
+		m.pending = nil
+		// Ride the retry-hint machinery so the hint is cleared by the next
+		// non-retry event and by endTurn; without it the idle status bar keeps
+		// reading "retrying" long after the turn finished cleanly.
+		m.retrying = true
+		m.status = fmt.Sprintf("stream dropped, retrying (%d/%d)", m.streamReplays, maxStreamReplays)
+		m.phase = phaseThinking
+		return m.startChat()
+	}
 	if isUnreachable(e.Err) {
 		m.connected = false
 	}
@@ -1079,6 +1146,9 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	m.appendLine(styleDim.Render(tools.InlineStatus(call)))
 	m.lastToolKey = toolTargetKey(call)
 	m.toolRounds++
+	if call.Name != tools.ReadFileName {
+		m.turnActed = true
+	}
 	m.phase = phaseRunning
 	return m, runToolCall(m.turnCtx, call)
 }
@@ -1163,12 +1233,23 @@ func toolResultFailed(name, result string) bool {
 }
 
 // recordToolOutcome updates the failure streak from one finished tool result.
-// A success (or a failure of a different target) resets the streak; a same-
-// target failure extends it. lastToolKey was stamped in dispatchNextTool for
-// the call this result belongs to.
+// Any success EXCEPT a read resets the streak; a same-target failure extends
+// it. lastToolKey was stamped in dispatchNextTool for the call this result
+// belongs to.
 func (m *Model) recordToolOutcome(name, content string) {
 	if !toolResultFailed(name, content) {
-		m.failKey, m.failStreak = "", 0
+		// A successful READ clears nothing: reading a file changes no state, so
+		// pairing a failing edit_file with a succeeding read_file of the same
+		// file - the most natural batch there is - must not reset the streak, or
+		// the loop-breaker never fires and the first supervision arrives at the
+		// runaway cap. Every other success IS progress and resets it, including
+		// on a different target: a healthy build loop batches a succeeding edit
+		// with a still-failing `go test`, and letting that build a streak hands
+		// the model a stop-shaped note five errors into ten - the premature-stop
+		// failure, arrived at from the other direction.
+		if name != tools.ReadFileName {
+			m.failKey, m.failStreak = "", 0
+		}
 		return
 	}
 	if m.lastToolKey == m.failKey && m.failKey != "" {
@@ -1201,41 +1282,50 @@ func (m *Model) maybeFailureNudge() {
 	m.failKey, m.failStreak = "", 0
 }
 
-// maxToolRounds caps tool calls per turn before the runaway self-check fires.
-// Above an honest large build (the galaxy runs that finished cleanly ran ~60),
-// below a genuine runaway, so a doomed loop the same-target failure streak
-// can't see (a blocked install or lib-hunt re-fired with cosmetic variations)
-// still gets a self-check with budget left, not after it has burned the turn.
-const maxToolRounds = 75
+// maxLLMRounds caps assistant round-trips per turn before the runaway
+// self-check fires, and runawayNudgeInterval is how often it re-fires past that
+// cap. Counted in round-trips rather than tool calls because batching makes a
+// call count meaningless: an honest large build is well under 60 round-trips,
+// a genuine runaway sails past it.
+const (
+	// 40 round-trips is ~20 minutes of model time. The old cap was 75 tool
+	// calls, which equalled 75 round-trips only because nothing batched; at a
+	// realistic 3 calls per message 60 would have let ~180 calls run before the
+	// first word, three times looser than the cap it replaced.
+	maxLLMRounds         = 40
+	runawayNudgeInterval = 25
+)
 
 // maybeRunawayNudge appends one soft system note when a turn crosses
-// maxToolRounds tool calls without finishing. The runawayNudged latch fires it
-// exactly once per turn: this is consulted only when the pending queue drains,
-// but toolRounds increments per call, so a multi-tool-call round can jump the
-// counter past maxToolRounds between checks: a bare equality test would skip
-// the threshold and never fire. Framed as a self-check, not a stop order:
+// maxLLMRounds round-trips without finishing, then again every
+// runawayNudgeInterval rounds after that. Comparing against lastRunawayRound
+// rather than latching keeps supervision alive for the rest of a long turn:
+// under the old once-per-turn latch, everything past the cap ran unwatched. The
+// gap test (not equality) survives a check being skipped, since this is only
+// consulted when the pending queue drains. Framed as a self-check, not a stop order:
 // telling a 30B to "stop" mid-task is the premature-completion failure we
 // otherwise fight, so the model decides whether it is still converging.
 func (m *Model) maybeRunawayNudge() {
-	if m.runawayNudged || m.toolRounds < maxToolRounds {
+	if m.llmRounds < maxLLMRounds || m.llmRounds-m.lastRunawayRound < runawayNudgeInterval {
 		return
 	}
-	m.runawayNudged = true
-	dbgWritef("nudge", "runaway-iteration nudge injected at %d tool calls this turn", m.toolRounds)
+	m.lastRunawayRound = m.llmRounds
+	dbgWritef("nudge", "runaway-iteration nudge injected at %d round-trips this turn", m.llmRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
 		Content: nudgeOrigin + fmt.Sprintf(
-			"%d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
-			m.toolRounds),
+			"%d round-trips so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
+			m.llmRounds),
 	})
 }
 
-// verifyNudgeMinRounds is how many tool calls a turn must have dispatched before
-// the finish re-grounding nudge can fire. Set so only a turn that did real,
-// multi-step work trips it: a quick answer or a one-line edit stays well under it,
-// while a build / refactor / test-fix loop clears it easily. Below this the
-// original request is still close in context and a re-ground would be noise; the
-// galaxy runs that shipped broken-but-claimed-done artifacts each made dozens.
+// verifyNudgeMinRounds is how many ROUND-TRIPS a turn must have taken before the
+// finish re-grounding nudge can fire. Counted in round-trips for the same reason
+// maxLLMRounds is: batching makes a call count meaningless, and a "fix the typo"
+// turn that batches six reads then edits and builds would clear a call-based
+// gate of 8 in two round-trips - taxing exactly the quick turns this is meant to
+// skip. Set so only a turn that did real, multi-step work trips it; the galaxy
+// runs that shipped broken-but-claimed-done artifacts each took dozens.
 const verifyNudgeMinRounds = 8
 
 // maybeVerifyNudge appends one re-grounding system note when a substantial turn
@@ -1248,7 +1338,12 @@ const verifyNudgeMinRounds = 8
 // honest verification, never a stop order: telling a 30B to "stop" mid-task is the
 // premature-completion failure we otherwise fight.
 func (m *Model) maybeVerifyNudge() bool {
-	if m.verifyNudged || m.toolRounds < verifyNudgeMinRounds {
+	if m.verifyNudged || m.llmRounds < verifyNudgeMinRounds {
+		return false
+	}
+	// A turn that only read has no artifact to falsely call green; re-grounding
+	// a code-reading answer is a wasted round-trip.
+	if !m.turnActed {
 		return false
 	}
 	// The nudge targets the false-green finish: a confident summary for work that
@@ -1263,10 +1358,10 @@ func (m *Model) maybeVerifyNudge() bool {
 		return false
 	}
 	m.verifyNudged = true
-	dbgWritef("nudge", "finish re-grounding nudge injected at %d tool calls this turn", m.toolRounds)
+	dbgWritef("nudge", "finish re-grounding nudge injected at %d round-trips this turn", m.llmRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role:    chmctx.RoleSystem,
-		Content: nudgeOrigin + "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it - build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed - then fix what breaks and re-run. If a check seems to need a runtime or browser this environment lacks, prove the lack with one read-only probe (`command -v node`, `command -v chromium chromium-browser google-chrome`, `ls ~/.cache/ms-playwright`) instead of assuming; the fire-once browser install your instructions allow is the ONE install worth attempting, and only if you haven't tried it this turn - never re-try a failed install or hunt missing libs, and if the probe comes up empty with no network, stop hunting. Only then mark the check `unverified: <what> - <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
+		Content: nudgeOrigin + "Before you finish: walk the original request part by part. For each part, name the check you actually ran and what it showed. Anything runnable is proven only by running it - build it, run the test, execute it, or load the page and drive the interaction. Fix what breaks and re-run. If a check genuinely could not run here, write `unverified: <what> - <why>` and lead with it instead of a confident \"works\". Then reply with your summary.",
 	})
 	return true
 }

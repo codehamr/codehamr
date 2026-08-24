@@ -206,6 +206,9 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.queued = nil
 	// Reset the repeated-failure streak so the next turn starts clean.
 	m.failKey, m.failStreak = "", 0
+	// The banner offers /clear as one of its two remedies, so clearing must
+	// re-arm it: a re-filled window is a new occurrence, not the same one.
+	m.ctxPressureWarned = false
 	// Wipe prompt recall too: in-memory ring and on-disk .codehamr/history,
 	// or leftover history would contradict the "fresh start" promise.
 	m.promptHistory = nil

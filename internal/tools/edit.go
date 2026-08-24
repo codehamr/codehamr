@@ -42,7 +42,7 @@ func EditFile(path, oldString, newString string) string {
 		if differsOnlyInWhitespace(content, oldString) {
 			return fmt.Sprintf("(not found: no exact match in %s - a block there differs only in whitespace (indentation/tabs/newlines); copy the exact bytes, including indentation)", path)
 		}
-		return fmt.Sprintf("(not found: old_string does not appear in %s)", path)
+		return fmt.Sprintf("(not found: old_string does not appear in %s - read the exact bytes back with read_file before retrying, don't retype them from memory)", path)
 	}
 	if n > 1 {
 		return fmt.Sprintf("(ambiguous: old_string appears %d times - provide more context to make it unique)", n)
@@ -78,7 +78,7 @@ func EditFileSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        EditFileName,
-			"description": "Surgically replace a single occurrence of old_string with new_string in an existing file. old_string must appear EXACTLY ONCE in the file - include enough surrounding context to make it unique. Prefer this over write_file for any change to an existing file shorter than a full rewrite: small typo fixes, single-line edits, swapping a function body. Errors (not found, ambiguous, file missing) come back as part of the result string, same as bash. A large new_string hits the same streamed-args truncation ceiling as write_file - chunk big insertions with bash heredoc appends instead.",
+			"description": "Surgically replace a single occurrence of old_string with new_string in an existing file. old_string must appear EXACTLY ONCE - include enough surrounding context to make it unique. Prefer this over write_file for any change to an existing file short of a full rewrite. To change several places, put several edit_file calls in the SAME message: they run in order against the file on disk, so they compose. Errors (not found, ambiguous, file missing) come back in the result string, same as bash.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

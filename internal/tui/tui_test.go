@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,7 +58,7 @@ func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	projectDir := "/workspaces/codehamr"
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
-	if !strings.Contains(m.system, "investigate with `read_file` and `bash`") {
+	if !strings.Contains(m.system, "open it yourself with `read_file`") {
 		t.Fatalf("system prompt missing the investigate-files-yourself rule:\n%s", m.system)
 	}
 	if !strings.Contains(m.system, "Working directory: "+projectDir) {
@@ -1980,54 +1981,54 @@ func countSystem(history []chmctx.Message) int {
 	return n
 }
 
-// TestRunawayNudgeFiresOnceAtMaxToolRounds: the per-turn tool-call counter trips
-// exactly one soft system note when it reaches maxToolRounds, and never before
-// or after. A once-per-turn latch keeps a long turn from double-firing it.
-func TestRunawayNudgeFiresOnceAtMaxToolRounds(t *testing.T) {
+// TestRunawayNudgeFiresAtMaxLLMRounds: the per-turn round-trip counter trips
+// one soft system note when it reaches maxLLMRounds, and not before. Counted in
+// round-trips, not tool calls: batching inflates the call count, so a call-based
+// cap would fire on a healthy turn that batched its reads.
+func TestRunawayNudgeFiresAtMaxLLMRounds(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 
-	m.toolRounds = maxToolRounds - 1
+	m.llmRounds = maxLLMRounds - 1
 	m.maybeRunawayNudge()
 	if n := countSystem(m.history); n != 0 {
 		t.Fatalf("below the cap must not nudge, got %d system notes", n)
 	}
 
-	m.toolRounds = maxToolRounds
+	m.llmRounds = maxLLMRounds
 	m.maybeRunawayNudge()
 	if n := countSystem(m.history); n != 1 {
 		t.Fatalf("at the cap expected one system nudge, got %d:\n%+v", n, m.history)
 	}
 	last := m.history[len(m.history)-1]
-	if !strings.Contains(last.Content, fmt.Sprintf("%d tool calls", maxToolRounds)) {
+	if !strings.Contains(last.Content, fmt.Sprintf("%d round-trips", maxLLMRounds)) {
 		t.Fatalf("runaway nudge should name the count: %q", last.Content)
 	}
 
-	m.toolRounds = maxToolRounds + 1
+	// Immediately after, and anywhere inside the interval, it must stay quiet.
+	m.llmRounds = maxLLMRounds + runawayNudgeInterval - 1
 	m.maybeRunawayNudge()
 	if n := countSystem(m.history); n != 1 {
-		t.Fatalf("past the cap must not re-fire, got %d system notes", n)
+		t.Fatalf("inside the interval must not re-fire, got %d system notes", n)
 	}
 }
 
-// TestRunawayNudgeFiresWhenCounterSkipsCap: a multi-tool-call round increments
-// toolRounds per call but the nudge is consulted only when the pending queue
-// drains, so the counter can jump from below maxToolRounds to above it without
-// ever landing on it. The latch (not a bare equality test) must still fire the
-// nudge exactly once when the cap is overshot.
-func TestRunawayNudgeFiresWhenCounterSkipsCap(t *testing.T) {
+// TestRunawayNudgeRefiresPeriodically: past the cap the check must keep firing
+// every runawayNudgeInterval rounds. Under the old once-per-turn latch a turn
+// that sailed past the cap ran completely unsupervised for the rest of its life,
+// which is exactly the runaway the nudge exists to catch.
+func TestRunawayNudgeRefiresPeriodically(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 
-	// Counter overshoots the cap without ever equaling it (the multi-call jump).
-	m.toolRounds = maxToolRounds + 3
+	// Overshoot the cap without ever landing on it (the multi-call jump).
+	m.llmRounds = maxLLMRounds + 3
 	m.maybeRunawayNudge()
 	if n := countSystem(m.history); n != 1 {
 		t.Fatalf("overshooting the cap must still fire once, got %d system notes", n)
 	}
-	// A later drain in the same turn must not re-fire.
-	m.toolRounds = maxToolRounds + 10
+	m.llmRounds += runawayNudgeInterval
 	m.maybeRunawayNudge()
-	if n := countSystem(m.history); n != 1 {
-		t.Fatalf("latch must prevent a second nudge in the same turn, got %d", n)
+	if n := countSystem(m.history); n != 2 {
+		t.Fatalf("a full interval later must re-fire, got %d system notes", n)
 	}
 }
 
@@ -2050,6 +2051,7 @@ func TestVerifyNudgeFiresOnceAtMinRounds(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 
 	m.toolRounds = verifyNudgeMinRounds - 1
+	m.llmRounds = verifyNudgeMinRounds - 1
 	if m.maybeVerifyNudge() {
 		t.Fatal("below the min-rounds gate must not nudge")
 	}
@@ -2058,6 +2060,8 @@ func TestVerifyNudgeFiresOnceAtMinRounds(t *testing.T) {
 	}
 
 	m.toolRounds = verifyNudgeMinRounds
+	m.llmRounds = verifyNudgeMinRounds
+	m.turnActed = true
 	if !m.maybeVerifyNudge() {
 		t.Fatal("at the min-rounds gate the nudge must fire and report it nudged")
 	}
@@ -2065,22 +2069,21 @@ func TestVerifyNudgeFiresOnceAtMinRounds(t *testing.T) {
 		t.Fatalf("at the gate expected one re-grounding note, got %d:\n%+v", n, m.history)
 	}
 	last := m.history[len(m.history)-1]
-	if !strings.Contains(last.Content, "unverified") || !strings.Contains(last.Content, "acceptance criteria") {
+	if !strings.Contains(last.Content, "unverified") || !strings.Contains(last.Content, "original request") {
 		t.Fatalf("re-grounding note must push honest verification against the original request: %q", last.Content)
 	}
-	// A missing runtime must be proven with a read-only probe, never assumed
-	// (the mc run asserted "no browser here" without ever checking) and never
-	// chased with an install hunt (the doomed apt-get loop). The fence allows
-	// exactly the prompt's fire-once install and forbids everything past it,
-	// so the nudge no longer contradicts the verify ladder at finish time.
-	if !strings.Contains(last.Content, "command -v") ||
-		!strings.Contains(last.Content, "never re-try a failed install") ||
-		!strings.Contains(last.Content, "fire-once") {
-		t.Fatalf("re-grounding note must demand a read-only runtime probe with the fire-once install fence: %q", last.Content)
+	// The note is re-sent as context on every remaining round of the turn, and
+	// it competes for attention with the actual task. The old 1240-char version
+	// carried a whole install-probe runbook that duplicated the system prompt;
+	// that guidance belongs in the always-on prompt, not stapled to a finish.
+	// Pin the budget so it can't grow back.
+	if len(last.Content) > 700 {
+		t.Fatalf("re-grounding note has grown back to %d chars; keep it a principle, not a runbook: %q", len(last.Content), last.Content)
 	}
 
 	// Latched: a later drain in the same turn must not re-fire.
 	m.toolRounds = verifyNudgeMinRounds + 50
+	m.llmRounds = verifyNudgeMinRounds + 50
 	if m.maybeVerifyNudge() {
 		t.Fatal("latch must prevent a second re-grounding nudge in the same turn")
 	}
@@ -2098,6 +2101,8 @@ func TestVerifyNudgeRePromptsSubstantialCleanFinish(t *testing.T) {
 	m.installTurnContext()
 	m.phase = phaseStreaming
 	m.toolRounds = verifyNudgeMinRounds
+	m.llmRounds = verifyNudgeMinRounds
+	m.turnActed = true
 	m.history = []chmctx.Message{
 		{Role: chmctx.RoleUser, Content: "build galaxy.html"},
 		{Role: chmctx.RoleAssistant, Content: "Done - built galaxy.html with all features."},
@@ -2126,6 +2131,7 @@ func TestVerifyNudgeSkipsTrivialTurn(t *testing.T) {
 	m.installTurnContext()
 	m.phase = phaseStreaming
 	m.toolRounds = verifyNudgeMinRounds - 1
+	m.llmRounds = verifyNudgeMinRounds - 1
 	m.history = []chmctx.Message{
 		{Role: chmctx.RoleUser, Content: "what does this function do?"},
 		{Role: chmctx.RoleAssistant, Content: "It hashes the input."},
@@ -2151,6 +2157,7 @@ func TestVerifyNudgeYieldsToEmptyReply(t *testing.T) {
 	m.installTurnContext()
 	m.phase = phaseStreaming
 	m.toolRounds = verifyNudgeMinRounds + 10
+	m.llmRounds = verifyNudgeMinRounds + 10
 	m.history = []chmctx.Message{
 		{Role: chmctx.RoleUser, Content: "build it"},
 		{Role: chmctx.RoleAssistant, Content: ""}, // empty: stopped mid-task
@@ -2177,6 +2184,7 @@ func TestVerifyNudgeSkipsHonestUnverifiedFinish(t *testing.T) {
 	m.installTurnContext()
 	m.phase = phaseStreaming
 	m.toolRounds = verifyNudgeMinRounds + 20
+	m.llmRounds = verifyNudgeMinRounds + 20
 	m.history = []chmctx.Message{
 		{Role: chmctx.RoleUser, Content: "build galaxy.html"},
 		{Role: chmctx.RoleAssistant, Content: "Built galaxy.html. unverified: browser runtime - no browser in this sandbox to load it."},
@@ -2228,7 +2236,7 @@ func TestVerifyNudgeEndToEndRePromptsThenFinishes(t *testing.T) {
 	}
 	var nudges int
 	for _, msg := range final.history {
-		if msg.Role == chmctx.RoleSystem && strings.Contains(msg.Content, "acceptance criteria") {
+		if msg.Role == chmctx.RoleSystem && strings.Contains(msg.Content, "original request") {
 			nudges++
 		}
 	}
@@ -3425,5 +3433,145 @@ func TestSubmitRecoversFromTransient404EndToEnd(t *testing.T) {
 	}
 	if final.phase.active() {
 		t.Fatalf("turn must end idle, phase=%v", final.phase)
+	}
+}
+
+// TestToolSchemasFitFixedToolsReservation is the FixedSystem pin's missing
+// sibling. The four schemas ride on every request exactly like the prompt does,
+// and they grow the same way (read_file gained offset/limit, write_file gained
+// append). Unpinned, the next parameter silently over-allocates history on
+// small-ctx profiles. On failure raise ctx.FixedTools; don't loosen this.
+func TestToolSchemasFitFixedToolsReservation(t *testing.T) {
+	cfg, _, _ := config.Bootstrap(t.TempDir())
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), "/workspaces/codehamr", "test")
+	wire, err := json.Marshal(m.buildTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost := len(wire) / 4; cost > chmctx.FixedTools {
+		t.Fatalf("tool schemas cost %d tokens, FixedTools reserves only %d - "+
+			"raise ctx.FixedTools so Budget() doesn't over-allocate to history",
+			cost, chmctx.FixedTools)
+	}
+}
+
+// TestFailureStreakSurvivesBatchedSuccess: the loop-breaker must count a target
+// that keeps failing even when the model batches a succeeding call alongside it.
+// Resetting the streak on ANY success is defeated by the most natural batch
+// there is - a failing edit_file paired with a succeeding read_file - which
+// would leave the first supervision to the runaway cap, dozens of round-trips
+// later.
+func TestFailureStreakSurvivesBatchedSuccess(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	for range maxToolFailStreak {
+		m.lastToolKey = "edit_file|src/app.js"
+		m.recordToolOutcome(tools.EditFileName, "(not found: old_string does not appear in src/app.js)")
+		m.lastToolKey = "read_file|src/app.js"
+		m.recordToolOutcome(tools.ReadFileName, "some file content")
+	}
+	if m.failStreak < maxToolFailStreak {
+		t.Fatalf("interleaved READ success reset the streak: got %d, want >= %d", m.failStreak, maxToolFailStreak)
+	}
+	m.maybeFailureNudge()
+	if n := countSystem(m.history); n != 1 {
+		t.Fatalf("a same-target failure streak must nudge, got %d system notes", n)
+	}
+	// A success on the FAILING target still clears it: that is real recovery.
+	m.lastToolKey = "edit_file|src/app.js"
+	m.failKey, m.failStreak = "edit_file|src/app.js", 3
+	m.recordToolOutcome(tools.EditFileName, "edited src/app.js")
+	if m.failStreak != 0 {
+		t.Fatalf("a success on the failing target must clear the streak, got %d", m.failStreak)
+	}
+}
+
+// TestVerifyNudgeSkipsReadOnlyTurn: a turn that only read files produced no
+// artifact that could be falsely called green, so re-grounding it is a wasted
+// round-trip on every research question.
+func TestVerifyNudgeSkipsReadOnlyTurn(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.toolRounds = verifyNudgeMinRounds + 20
+	m.llmRounds = verifyNudgeMinRounds + 20
+	m.turnActed = false
+	m.history = []chmctx.Message{
+		{Role: chmctx.RoleUser, Content: "how does packing work?"},
+		{Role: chmctx.RoleAssistant, Content: "Pack walks newest-first into Budget()."},
+	}
+	if m.maybeVerifyNudge() {
+		t.Fatal("a read-only turn must not be re-grounded")
+	}
+	// The same turn, once it acts, is back in scope.
+	m.turnActed = true
+	if !m.maybeVerifyNudge() {
+		t.Fatal("a turn that acted must still be re-grounded")
+	}
+}
+
+// TestMidStreamDropReplaysWithoutDuplicating: a socket that dies mid-answer
+// must be retried transparently instead of ending the turn. History is written
+// only on EventDone, so the replayed round must leave exactly one assistant
+// message - not the partial text plus the retry.
+func TestMidStreamDropReplaysWithoutDuplicating(t *testing.T) {
+	var round int
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		round++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"half an ans\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		if round == 1 {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"wer.\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":4}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+	m := newTestModel(t, handler)
+	final := drainFinal(t, m, "answer me")
+
+	if round != 2 {
+		t.Fatalf("a mid-stream drop must be replayed once (want 2 requests, got %d)", round)
+	}
+	var assistants []string
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleAssistant {
+			assistants = append(assistants, msg.Content)
+		}
+	}
+	if len(assistants) != 1 {
+		t.Fatalf("replay must not duplicate the assistant message, got %d: %q", len(assistants), assistants)
+	}
+	if assistants[0] != "half an answer." {
+		t.Fatalf("replayed round should carry the complete answer, got %q", assistants[0])
+	}
+	if final.phase != phaseIdle {
+		t.Fatalf("turn must end idle after a replayed round, phase=%v", final.phase)
+	}
+}
+
+// TestFailureStreakDecaysOnRealProgress is the counterweight to
+// TestFailureStreakSurvivesBatchedSuccess. A read can't fix anything, so it must
+// not clear the streak - but every other success is progress and must. The
+// canonical healthy loop is a succeeding edit_file batched with a `go test` that
+// still fails, on a different error each round. Letting that build a streak
+// hands a converging model a note saying "stop repeating it ... or tell the user
+// what's blocking you" five errors into ten, which ctx.Pack then demotes to the
+// USER role on the wire - so a 30B reads its own user telling it to give up.
+func TestFailureStreakDecaysOnRealProgress(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	for i := range maxToolFailStreak + 3 {
+		m.lastToolKey = fmt.Sprintf("edit_file|src/file%d.go", i)
+		m.recordToolOutcome(tools.EditFileName, "edited src/file.go")
+		m.lastToolKey = "bash|go test ./..."
+		m.recordToolOutcome(tools.BashName, fmt.Sprintf("undefined: thing%d\n(exit: exit status 1)", i))
+		if m.failStreak > 1 {
+			t.Fatalf("round %d: a succeeding edit must reset the streak, got %d", i, m.failStreak)
+		}
+	}
+	m.maybeFailureNudge()
+	if n := countSystem(m.history); n != 0 {
+		t.Fatalf("a converging build loop must not be told to stop, got %d system notes:\n%+v", n, m.history)
 	}
 }
