@@ -66,7 +66,7 @@ func TestTruncateLargeCollapses(t *testing.T) {
 	if !strings.Contains(out, "truncated") {
 		t.Fatalf("expected truncation marker, got %q", out)
 	}
-	if Tokens(out) > 2*ToolHeadTail+200 {
+	if Tokens(out) > ToolTruncHead+ToolTruncTail+200 {
 		t.Fatalf("truncated output too large: %d tokens", Tokens(out))
 	}
 	if !strings.HasPrefix(out, in[:100]) {
@@ -74,6 +74,11 @@ func TestTruncateLargeCollapses(t *testing.T) {
 	}
 	if !strings.HasSuffix(out, in[len(in)-100:]) {
 		t.Fatal("expected tail preserved")
+	}
+	// Tail bias: errors sit at the end of long output, so the kept tail must be
+	// larger than the kept head (the spill file covers the dropped middle).
+	if ToolTruncTail <= ToolTruncHead {
+		t.Fatalf("truncation must keep more tail than head, got head=%d tail=%d", ToolTruncHead, ToolTruncTail)
 	}
 }
 

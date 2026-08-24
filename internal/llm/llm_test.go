@@ -1351,3 +1351,60 @@ func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop: a proxy/LB that
+// gracefully closes the upstream mid-generation produces a clean EOF with no
+// [DONE], no finish_reason, and no usage frame. That must surface as a
+// MidStream EventError (so the TUI's bounded replay re-issues the request),
+// never as EventDone: finalizing it hands the turn a mid-sentence-truncated
+// assistant message as a clean finish - a transport-level false green no
+// nudge can see.
+func TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial ans\"}}]}\n\n")
+		// connection closes cleanly: no [DONE], no finish_reason, no usage
+	}))
+	defer srv.Close()
+
+	events := collect(New(srv.URL, "m", "").Chat(context.Background(),
+		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
+
+	last := events[len(events)-1]
+	if last.Kind != EventError {
+		t.Fatalf("signal-less EOF must end in EventError, got kind %v (events: %+v)", last.Kind, events)
+	}
+	if !last.MidStream {
+		t.Fatalf("frames arrived before the cut, so the drop must be replayable (MidStream), got %v", last.Err)
+	}
+	for _, e := range events {
+		if e.Kind == EventDone {
+			t.Fatal("a cut stream must not emit EventDone")
+		}
+	}
+}
+
+// TestChatFinishReasonAloneCompletesStream: a backend that omits [DONE] but
+// closes its last frame with a finish_reason (any value - Ollama's shim emits
+// "stop" even after tool calls) finished on purpose; the turn must complete
+// cleanly, not be treated as a drop.
+func TestChatFinishReasonAloneCompletesStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		// no [DONE], no usage
+	}))
+	defer srv.Close()
+
+	events := collect(New(srv.URL, "m", "").Chat(context.Background(),
+		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
+
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("finish_reason is a completion signal; want EventDone, got kind %v (err: %v)", last.Kind, last.Err)
+	}
+	if last.Final == nil || last.Final.Content != "done answer" {
+		t.Fatalf("final message must carry the streamed content, got %+v", last.Final)
+	}
+}

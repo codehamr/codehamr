@@ -228,7 +228,10 @@ type Model struct {
 	// loop on plausible *non-failing* calls (re-read, re-grep, re-list) forever;
 	// the failure streak only catches repeated *failures*, so that hole stayed
 	// open. toolRounds counts tool calls dispatched this turn (reset in endTurn)
-	// and gates the finish nudge; the runaway check counts llmRounds instead.
+	// and is one of the finish nudge's two gates (see maybeVerifyNudge: the
+	// batching instruction compresses a substantial turn into few round-trips,
+	// so either measure of real work must trip it); the runaway check counts
+	// llmRounds instead.
 	toolRounds int
 	// llmRounds counts assistant round-trips this turn, the honest measure of
 	// "how many times has the model gone around the loop". toolRounds counts
@@ -251,6 +254,22 @@ type Model struct {
 	// the condition holds for every remaining round, so an unlatched warning
 	// would paper the transcript.
 	ctxPressureWarned bool
+	// budgetFloorWarned / ctxTruncationWarned latch the two misconfiguration
+	// banners below to once per session, for the same papering reason.
+	// budgetFloor fires when context_size is so small that Pack's fixed
+	// reservations leave near-zero history (the agent forgets everything
+	// between rounds, silently). ctxTruncation fires when the server reports a
+	// prompt_tokens count far BELOW what the packer sent: char/4 only ever
+	// UNDERcounts, so a server count under half the estimate means the server
+	// dropped content - the stock-Ollama small-num_ctx front-truncation that
+	// eats the system prompt first, which the >=95% tripwire above structurally
+	// cannot see when the configured window is larger than the served one.
+	budgetFloorWarned   bool
+	ctxTruncationWarned bool
+	// lastPromptEstimate is the packer's char/4 token estimate of the request
+	// most recently sent, compared in applyDone against the server-reported
+	// prompt_tokens to detect silent server-side truncation.
+	lastPromptEstimate int
 	// turnActed is false while a turn has done nothing but read_file - a
 	// question answered out of the codebase, with no artifact that could be
 	// falsely called green. Deliberately "not read_file" rather than
@@ -276,7 +295,8 @@ type Model struct {
 	// doing-too-much (failure, runaway) and stopping-with-nothing-said (empty).
 	// This catches the false-green finish: a turn that did real work ending with a
 	// confident summary for something it never actually ran. When a substantial
-	// turn (toolRounds >= verifyNudgeMinRounds) is about to finish with a clean,
+	// turn (llmRounds >= verifyNudgeMinRounds, or toolRounds >= verifyNudgeMinCalls)
+	// is about to finish with a clean,
 	// non-empty reply, one re-prompt makes the model re-walk the original request
 	// and run the check that proves each runnable part, or mark it unverified
 	// honestly, instead of dressing up a brace-count or an HTTP 200 as proof. A
@@ -710,13 +730,30 @@ func (m *Model) endTurn() {
 	}
 }
 
+// minUsableBudget is the history budget below which the agent is effectively
+// amnesiac: Pack keeps little beyond the newest message, so every round
+// forgets the last. Budget(8192) is already 0 and Budget(16384) ~5k, so this
+// fires only on genuinely misconfigured small windows.
+const minUsableBudget = 4096
+
 func (m *Model) buildMessages() []chmctx.Message {
 	ctxSize := m.activeContextSize()
 	budget := chmctx.Budget(ctxSize)
+	if budget < minUsableBudget && !m.budgetFloorWarned {
+		m.budgetFloorWarned = true
+		m.appendLine(styleError.Render(fmt.Sprintf(
+			"⚠ context_size %d leaves only %d tokens for history after fixed reservations - the agent will forget almost everything between rounds. Raise context_size in .codehamr/config.yaml (and the server's real window) to 32768+.",
+			ctxSize, budget)))
+	}
 	r := chmctx.Pack(m.history, budget)
 	out := make([]chmctx.Message, 0, len(r.Messages)+1)
 	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: m.system})
 	out = append(out, r.Messages...)
+	est := 0
+	for i := range out {
+		est += out[i].Tokens()
+	}
+	m.lastPromptEstimate = est
 	dbgWriteRequest(m.cfg.ActiveProfile().LLM, ctxSize, budget, len(m.history), out)
 	return out
 }
@@ -888,6 +925,23 @@ func (m *Model) applyDone(e llm.Event) {
 				"⚠ prompt is at %d of %d context tokens. Your server may be silently truncating it (the system prompt goes first). Lower context_size in .codehamr/config.yaml to match what the server really serves, or /clear.",
 				e.PromptTokens, ctxSize)))
 		}
+	}
+	// The inverse tripwire: the server counted far FEWER prompt tokens than the
+	// packer sent. char/4 only ever UNDERcounts (measured ~1.6x on code-heavy
+	// history) and chat-template overhead inflates the server's count further,
+	// so a report under HALF the estimate can only mean the server dropped
+	// content before the model saw it - stock Ollama's small default num_ctx
+	// front-truncating the system prompt away while the configured context_size
+	// says there is room. The >=95% check above can never fire in that state
+	// (prompt_tokens plateaus far below the configured window), which is
+	// exactly why this one exists. The 12k floor keeps small early prompts,
+	// where fixed overhead dominates, from tripping it.
+	if e.PromptTokens > 0 && m.lastPromptEstimate > 12000 && e.PromptTokens < m.lastPromptEstimate/2 && !m.ctxTruncationWarned {
+		m.ctxTruncationWarned = true
+		dbgWritef("ctx_truncation", "server prompt_tokens=%d vs packed estimate=%d; server-side truncation", e.PromptTokens, m.lastPromptEstimate)
+		m.appendLine(styleError.Render(fmt.Sprintf(
+			"⚠ the server processed only %d tokens of a ~%d-token prompt - it is silently truncating context (the system prompt goes first). Raise the server's window (e.g. Ollama num_ctx) or lower context_size in .codehamr/config.yaml to what it really serves.",
+			e.PromptTokens, m.lastPromptEstimate)))
 	}
 	m.flushStreaming()
 }
@@ -1314,7 +1368,7 @@ func (m *Model) maybeRunawayNudge() {
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
 		Content: nudgeOrigin + fmt.Sprintf(
-			"%d round-trips so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
+			"%d round-trips so far this turn without finishing. If you're still making real progress, keep going: re-read the original request in this conversation and state in one line what remains, then continue. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
 			m.llmRounds),
 	})
 }
@@ -1326,10 +1380,21 @@ func (m *Model) maybeRunawayNudge() {
 // gate of 8 in two round-trips - taxing exactly the quick turns this is meant to
 // skip. Set so only a turn that did real, multi-step work trips it; the galaxy
 // runs that shipped broken-but-claimed-done artifacts each took dozens.
-const verifyNudgeMinRounds = 8
+//
+// verifyNudgeMinCalls is the second gate, in CALLS, closing the hole the
+// round-trip gate opens: the same batching that inflates call counts also
+// COMPRESSES a substantial build-and-claim turn below 8 round-trips (five
+// rounds of three calls each is real work with a real false-green risk), and
+// that turn would otherwise skip re-grounding entirely. Either measure of
+// substantial work trips the nudge; a quick turn clears both.
+const (
+	verifyNudgeMinRounds = 8
+	verifyNudgeMinCalls  = 15
+)
 
 // maybeVerifyNudge appends one re-grounding system note when a substantial turn
-// (>= verifyNudgeMinRounds tool calls) is about to finish with a clean, non-empty
+// (>= verifyNudgeMinRounds round-trips, or >= verifyNudgeMinCalls tool calls) is
+// about to finish with a clean, non-empty
 // reply, then latches so it fires at most once per turn. Returns true when it
 // nudged, so the caller re-prompts and the model can verify before its final
 // summary. The false-green finish (a confident summary for an artifact that was
@@ -1338,7 +1403,7 @@ const verifyNudgeMinRounds = 8
 // honest verification, never a stop order: telling a 30B to "stop" mid-task is the
 // premature-completion failure we otherwise fight.
 func (m *Model) maybeVerifyNudge() bool {
-	if m.verifyNudged || m.llmRounds < verifyNudgeMinRounds {
+	if m.verifyNudged || (m.llmRounds < verifyNudgeMinRounds && m.toolRounds < verifyNudgeMinCalls) {
 		return false
 	}
 	// A turn that only read has no artifact to falsely call green; re-grounding

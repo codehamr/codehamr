@@ -48,7 +48,14 @@ func (m Message) Tokens() int {
 
 const (
 	ToolOutputCap = 6000
-	ToolHeadTail  = 2000
+	// Head/tail kept when a result overflows the cap. Tail-heavy on purpose: in
+	// practice only bash output ever overflows (read_file windows itself under
+	// the cap), and the failing assertion, stack trace, or compiler error of a
+	// long command sits at the END of its output; the spill file already covers
+	// the dropped middle, so the free window should hold the part that names
+	// the failure.
+	ToolTruncHead = 1000
+	ToolTruncTail = 3000
 	// FixedSystem reserves budget for the embedded prompt + working-dir anchor
 	// (see tui.buildSystem), FixedTools for the four tool schemas. PROMPT_SYS.md
 	// + anchor is ~1340 tokens since the incident runbooks (the browser ladder,
@@ -80,20 +87,22 @@ func ResponseReserve(ctxSize int) int {
 	return 8000
 }
 
-// Truncate collapses oversized tool outputs to first 2k + last 2k tokens;
+// Truncate collapses oversized tool outputs to first 1k + last 3k tokens;
 // inputs at or under 6k pass through unchanged. Head/tail can't overlap:
 // >6k tokens means >24k bytes, well over the 16k kept. Boundaries snap to a
 // valid UTF-8 rune start so non-ASCII output never breaks mid-sequence.
+// The marker defers to the spill file tools.Execute names right below it, so
+// the model never reads "re-run the command" and "don't re-run it" in one
+// result; re-running narrower is only the fallback when no spill happened.
 func Truncate(out string) string {
 	total := Tokens(out)
 	if total <= ToolOutputCap {
 		return out
 	}
-	limit := ToolHeadTail * 4
-	head := runeBoundaryDown(out, limit)
-	tail := runeBoundaryUp(out, len(out)-limit)
-	marker := fmt.Sprintf("\n───── truncated: %d tokens total, first %d + last %d shown, the middle is OMITTED. This is a PARTIAL view; you can't review or conclude from code you can't see here, so re-run narrower (grep/sed/head/tail) to read the omitted span. ─────\n",
-		total, ToolHeadTail, ToolHeadTail)
+	head := runeBoundaryDown(out, ToolTruncHead*4)
+	tail := runeBoundaryUp(out, len(out)-ToolTruncTail*4)
+	marker := fmt.Sprintf("\n───── truncated: %d tokens total, first %d + last %d shown, the middle is OMITTED. This is a PARTIAL view; you can't review or conclude from what you can't see here. If a line below names a full-output file, grep or read that file for the omitted span; otherwise re-run narrower (grep/sed/head/tail). ─────\n",
+		total, ToolTruncHead, ToolTruncTail)
 	return out[:head] + marker + out[tail:]
 }
 

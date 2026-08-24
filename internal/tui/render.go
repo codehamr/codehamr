@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -273,6 +275,22 @@ func (m Model) View() string {
 	return strings.Join(pieces, "\n")
 }
 
+// noPosixShell: tools.Bash runs every command through /bin/sh, which a native
+// Windows host does not have, so every tool call there fails - a new user's
+// first turn would be a confusing five-failure streak ending in a nudge. Say
+// it once, up front. Computed once at init: splashLines re-runs on every
+// resize, and main's pre-TUI screen wipe erases anything printed earlier.
+var noPosixShell = func() bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	_, err := os.Stat("/bin/sh")
+	return err != nil
+}()
+
+// posixShellWarning is the one-line splash warning for noPosixShell hosts.
+const posixShellWarning = "  ⚠ no POSIX shell: the bash tool needs /bin/sh and will fail every call - run codehamr inside WSL2 or a devcontainer."
+
 // splashLines builds the identity block for tea.Println. Below wordmarkWidth
 // the ASCII art soft-wraps into garbage, so collapse to plain text.
 func (m Model) splashLines() []string {
@@ -291,9 +309,12 @@ func (m Model) splashLines() []string {
 			styleDim.Render("  Run inside a devcontainer or VM where it cannot cause damage outside the sandbox."),
 			"",
 		)
+		if noPosixShell {
+			lines = append(lines, styleError.Render(posixShellWarning), "")
+		}
 		return lines
 	}
-	return []string{
+	lines := []string{
 		"",
 		styleHamr.Render("  codehamr"),
 		styleDim.Render(fmt.Sprintf("  %s · %s @ %s",
@@ -302,6 +323,10 @@ func (m Model) splashLines() []string {
 		styleDim.Render("  Sandboxed AI shell - run in a devcontainer or VM."),
 		"",
 	}
+	if noPosixShell {
+		lines = append(lines, styleError.Render(posixShellWarning), "")
+	}
+	return lines
 }
 
 func (m Model) renderStatusBar() string {

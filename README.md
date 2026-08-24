@@ -88,7 +88,7 @@ Info for Ollama users: Ollama's `/v1` endpoint reports no context-window header,
 
 Sampling matters too: for coding, a ~30B-class model typically wants `temperature 0.6`, `top_p 0.95`, `top_k 20`, and **never greedy decoding** (temp 0), which sends it into endless repetition loops. If it still loops, add a small `presence_penalty` and check your server actually applies it (current Ollama silently ignores penalty params). These are server-side knobs, set them at your endpoint.
 
-If the model prints tool calls as text instead of acting, enable your server's tool-call parser; codehamr warns you when that happens.
+If the model prints tool calls as text instead of acting, enable your server's tool-call parser; codehamr warns you when that happens. Tool calling lives in the server's chat template and parser, so most "the agent ignores tools" failures are fixed by upgrading the server (or switching to a current `llama-server --jinja`), not the client. And leave KV-cache quantization off for agent work: the quality loss hits tool-call JSON first.
 
 ## Give the agent a runtime
 

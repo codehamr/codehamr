@@ -244,3 +244,23 @@ func TestReadFileKeepsExactBytesAcrossAnOverLongCut(t *testing.T) {
 		t.Fatalf("bytes before the cut must survive verbatim, got %q", got[:20])
 	}
 }
+
+// TestReadFileTooLargeRefused: read_file slurps whole files, so a multi-GB
+// log would OOM the process; the Stat gate refuses it with a recovery string.
+// Sparse file: Truncate allocates no blocks, so the test costs no real disk.
+func TestReadFileTooLargeRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	got := ReadFile(path, 0, 0)
+	if !strings.Contains(got, "too large") || !strings.Contains(got, "grep") {
+		t.Fatalf("want too-large refusal naming a bash recovery, got %q", got[:min(len(got), 120)])
+	}
+}

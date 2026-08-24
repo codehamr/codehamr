@@ -2045,8 +2045,9 @@ func TestEndTurnResetsToolRounds(t *testing.T) {
 }
 
 // TestVerifyNudgeFiresOnceAtMinRounds: the finish re-grounding nudge trips one
-// soft system note only once a turn has done real work (toolRounds >=
-// verifyNudgeMinRounds), and never below it; the latch keeps it to once per turn.
+// soft system note only once a turn has done real work (llmRounds >=
+// verifyNudgeMinRounds, or toolRounds >= verifyNudgeMinCalls), and never below
+// it; the latch keeps it to once per turn.
 func TestVerifyNudgeFiresOnceAtMinRounds(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 
@@ -2089,6 +2090,24 @@ func TestVerifyNudgeFiresOnceAtMinRounds(t *testing.T) {
 	}
 	if n := countSystem(m.history); n != 1 {
 		t.Fatalf("latch must hold at one note, got %d", n)
+	}
+}
+
+// TestVerifyNudgeFiresOnBatchedCalls: the batching instruction compresses a
+// substantial build-and-claim turn below verifyNudgeMinRounds round-trips
+// (five rounds of three calls each is real work with a real false-green
+// risk), so the call-count gate must trip the nudge on its own. Guards the
+// hole where the prompt's biggest lever silently disabled the fourth backstop.
+func TestVerifyNudgeFiresOnBatchedCalls(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.llmRounds = verifyNudgeMinRounds - 3 // few round-trips...
+	m.toolRounds = verifyNudgeMinCalls     // ...but many batched calls
+	m.turnActed = true
+	if !m.maybeVerifyNudge() {
+		t.Fatal("a heavily-batched substantial turn must still be re-grounded")
+	}
+	if n := countSystem(m.history); n != 1 {
+		t.Fatalf("expected one re-grounding note, got %d", n)
 	}
 }
 

@@ -87,13 +87,16 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
-// streamChunk is one OpenAI SSE frame. finish_reason is deliberately not
-// decoded: readSSE dispatches accumulated tool calls at stream end, not on
+// streamChunk is one OpenAI SSE frame. finish_reason is deliberately never
+// ROUTED on (readSSE dispatches accumulated tool calls at stream end, not on
 // finish_reason=="tool_calls", staying provider agnostic since Ollama's /v1 shim
-// sometimes closes with "stop" even after streaming tool_calls.
+// sometimes closes with "stop" even after streaming tool_calls); it is decoded
+// only as one of the end-of-stream completion signals, where any non-empty
+// value - right or wrong - means the server finished on purpose.
 type streamChunk struct {
 	Choices []struct {
-		Delta streamDelta `json:"delta"`
+		Delta        streamDelta `json:"delta"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		CompletionTokens int `json:"completion_tokens"`
@@ -606,6 +609,13 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 		order        []int
 		tokens       int
 		promptTokens int
+		// complete goes true on any end-of-stream signal: [DONE], a non-empty
+		// finish_reason, or a usage frame. A stream that ends without one was
+		// cut, not finished - a proxy/LB gracefully closing the upstream
+		// mid-generation looks exactly like clean EOF to the scanner, and
+		// finalizing it would hand the TUI a mid-sentence assistant message as
+		// a clean finish: a transport-level false green no nudge can see.
+		complete bool
 	)
 
 	for scanner.Scan() {
@@ -625,6 +635,7 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 		}
 		payload := bytes.TrimSpace(line[len("data:"):])
 		if bytes.Equal(payload, []byte("[DONE]")) {
+			complete = true
 			break
 		}
 		var sc streamChunk
@@ -639,17 +650,28 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 			return nil, 0, 0, &serverStreamError{msg: msg}
 		}
 		for _, choice := range sc.Choices {
+			if choice.FinishReason != "" {
+				complete = true
+			}
 			if !dispatchDelta(parent, choice.Delta, budget, &fullContent, slots, &order, out) {
 				return nil, 0, 0, parent.Err()
 			}
 		}
 		if sc.Usage != nil {
+			complete = true
 			tokens = sc.Usage.CompletionTokens
 			promptTokens = sc.Usage.PromptTokens
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, 0, 0, err
+	}
+	if !complete {
+		// Clean EOF with no completion signal: the connection was cut, not
+		// finished. Returned as a plain error (not serverStreamError), so run()
+		// marks it MidStream when frames had arrived and the TUI's bounded
+		// replay re-issues the request instead of finalizing a truncated reply.
+		return nil, 0, 0, errors.New("the stream ended without a completion signal ([DONE], finish_reason, or usage) - the connection was likely cut mid-response")
 	}
 
 	// Emit accumulated tool calls once at stream end, independent of

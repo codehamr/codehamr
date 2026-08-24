@@ -59,10 +59,12 @@ func TestEditFileOldNotFound(t *testing.T) {
 	}
 }
 
-// TestEditFileWhitespaceNearMissHint: a miss whose only difference is
-// indentation gets the diagnostic hint, and the file is left untouched (the
-// hint is detection only, never a fuzzy apply).
-func TestEditFileWhitespaceNearMissHint(t *testing.T) {
+// TestEditFileWhitespaceFuzzyApply: a miss whose only difference is
+// indentation, matching whole lines exactly once, is APPLIED (the retyped-
+// indentation failure is the canonical weak-model edit_file miss; a unique
+// whole-line match preserves the exactly-once guarantee). new_string goes in
+// as given; every surrounding byte survives exactly.
+func TestEditFileWhitespaceFuzzyApply(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.go")
 	const orig = "func main() {\n\treturn 1\n}\n" // file indents with a tab
@@ -70,11 +72,71 @@ func TestEditFileWhitespaceNearMissHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := EditFile(path, "    return 1", "    return 2") // model supplied spaces
-	if !strings.Contains(s, "differs only in whitespace") {
-		t.Fatalf("want whitespace near-miss hint, got %q", s)
+	if !strings.Contains(s, "edited") || !strings.Contains(s, "whitespace") {
+		t.Fatalf("want fuzzy apply, got %q", s)
+	}
+	if !strings.Contains(s, "lines 2-2") {
+		t.Fatalf("result must name the matched lines, got %q", s)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "func main() {\n    return 2\n}\n" {
+		t.Fatalf("bad fuzzy apply result: %q", got)
+	}
+}
+
+// TestEditFileWhitespaceFuzzyApplyMultiline: an indent-shifted multi-line
+// block applies, preserving the lines around it byte-exactly.
+func TestEditFileWhitespaceFuzzyApplyMultiline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.py")
+	const orig = "def f():\n    if x:\n        do(1)\n        do(2)\n    return\n"
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Model retyped the block one indent level off.
+	s := EditFile(path, "if x:\n    do(1)\n    do(2)", "    if y:\n        do(1)\n        do(2)")
+	if !strings.Contains(s, "edited") {
+		t.Fatalf("want fuzzy apply, got %q", s)
+	}
+	want := "def f():\n    if y:\n        do(1)\n        do(2)\n    return\n"
+	if got, _ := os.ReadFile(path); string(got) != want {
+		t.Fatalf("bad fuzzy apply result: %q", got)
+	}
+}
+
+// TestEditFileWhitespaceNearMissMidLineStillHints: a whitespace near-miss that
+// is NOT a run of whole lines (the match covers only part of a line) must not
+// fuzzy-apply; it keeps the diagnostic hint and the file stays untouched.
+func TestEditFileWhitespaceNearMissMidLineStillHints(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.go")
+	const orig = "x := f(a,  b) + g()\n" // double space inside the call
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := EditFile(path, "f(a, b)", "f(a, b, c)") // fields of the line != fields of old_string
+	if !strings.Contains(s, "not found") {
+		t.Fatalf("mid-line near-miss must not apply, got %q", s)
 	}
 	if got, _ := os.ReadFile(path); string(got) != orig {
-		t.Fatalf("file modified on near-miss: %q", got)
+		t.Fatalf("file modified on mid-line near-miss: %q", got)
+	}
+}
+
+// TestEditFileWhitespaceFuzzyAmbiguousFails: two whole-line fuzzy matches must
+// not apply - the exactly-once guarantee holds in the fuzzy path too.
+func TestEditFileWhitespaceFuzzyAmbiguousFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	const orig = "\tfoo bar\nx\n    foo bar\n"
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := EditFile(path, "foo  bar", "baz") // double space: no exact match anywhere
+	if !strings.Contains(s, "not found") {
+		t.Fatalf("ambiguous fuzzy match must fail, got %q", s)
+	}
+	if got, _ := os.ReadFile(path); string(got) != orig {
+		t.Fatalf("file modified on ambiguous fuzzy match: %q", got)
 	}
 }
 
@@ -237,5 +299,39 @@ func TestEditFileSchemaShape(t *testing.T) {
 		if _, ok := props[key]; !ok {
 			t.Fatalf("missing property %q", key)
 		}
+	}
+}
+
+// TestEditFileTooLargeRefused: edit_file slurps whole files like read_file;
+// the same Stat gate refuses oversized ones with a bash recovery.
+func TestEditFileTooLargeRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.log")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	got := EditFile(path, "a", "b")
+	if !strings.Contains(got, "too large") || !strings.Contains(got, "sed") {
+		t.Fatalf("want too-large refusal naming a bash recovery, got %q", got)
+	}
+}
+
+// TestEditFileAmbiguousNamesLines: the ambiguous failure names the line of
+// each occurrence the scan already visited, so the model can disambiguate
+// without a full re-read round.
+func TestEditFileAmbiguousNamesLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("foo\nbar\nfoo\nbaz\nfoo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := EditFile(path, "foo", "qux")
+	if !strings.Contains(s, "lines 1, 3, 5") {
+		t.Fatalf("ambiguous failure must name lines 1, 3, 5, got %q", s)
 	}
 }
