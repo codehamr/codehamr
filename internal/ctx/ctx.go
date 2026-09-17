@@ -3,6 +3,7 @@
 package ctx
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -30,6 +31,12 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolName   string     `json:"name,omitempty"`
+	// Reasoning holds the assistant round's reasoning items exactly as the
+	// server emitted them, replayed verbatim on every later request. Opaque on
+	// purpose: OpenAI's are encrypted, a local server's are plain text, and
+	// neither is ever read here. They live on the message so the newest-first
+	// budget walk keeps a round's reasoning, calls and results together.
+	Reasoning []json.RawMessage `json:"reasoning,omitempty"`
 }
 
 // Tokens approximates token count as char/4, good enough for budgeting.
@@ -42,6 +49,12 @@ func (m Message) Tokens() int {
 		for k, v := range tc.Arguments {
 			n += Tokens(k) + Tokens(fmt.Sprint(v))
 		}
+	}
+	// Replayed reasoning costs context too. char/4 over an encrypted blob
+	// overcounts the tokens it decrypts to, which errs on the safe side of
+	// the window.
+	for _, r := range m.Reasoning {
+		n += Tokens(string(r))
 	}
 	return n + 8
 }

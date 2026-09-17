@@ -26,18 +26,48 @@ func collect(ch <-chan Event) []Event {
 	return evs
 }
 
-// sseOK writes an OpenAI-style streamed response plus a [DONE] terminator. The
-// budget header travels on the 200 like in production.
-func sseOK(w http.ResponseWriter, chunks []string) {
+// sseOK writes a Responses stream: each event as `event:`+`data:` the way
+// OpenAI and vLLM emit it, closed by response.completed carrying the usage.
+// The budget header travels on the 200 like in production.
+func sseOK(w http.ResponseWriter, events []string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Budget-Remaining", "0.73")
-	for _, c := range chunks {
-		fmt.Fprintf(w, "data: %s\n\n", c)
+	for _, e := range events {
+		writeEvent(w, e)
 	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
-// TestChatStreamsContent: content deltas merge into one final string.
+func writeEvent(w io.Writer, data string) {
+	var ev struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal([]byte(data), &ev)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
+}
+
+// Shorthands for the events the tests replay.
+func textDelta(s string) string {
+	return fmt.Sprintf(`{"type":"response.output_text.delta","output_index":0,"delta":%q}`, s)
+}
+
+func completed(outputTokens, inputTokens int) string {
+	return fmt.Sprintf(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":%d,"output_tokens":%d}}}`, inputTokens, outputTokens)
+}
+
+func callAdded(idx int, callID, name string) string {
+	return fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","id":"fc_%s","call_id":%q,"name":%q,"arguments":""}}`, idx, callID, callID, name)
+}
+
+func argsDelta(idx int, s string) string {
+	return fmt.Sprintf(`{"type":"response.function_call_arguments.delta","output_index":%d,"delta":%q}`, idx, s)
+}
+
+func callDone(idx int, callID, name, args string) string {
+	return fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"type":"function_call","id":"fc_%s","call_id":%q,"name":%q,"arguments":%q}}`, idx, callID, callID, name, args)
+}
+
+// TestChatStreamsContent: text deltas merge into one final string; the request
+// carries model, medium reasoning and stateless mode.
 func TestChatStreamsContent(t *testing.T) {
 	var gotAuth, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,8 +75,10 @@ func TestChatStreamsContent(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"Hel"}}]}`,
-			`{"choices":[{"delta":{"content":"lo"}}],"usage":{"completion_tokens":7}}`,
+			`{"type":"response.created","response":{"status":"in_progress"}}`,
+			textDelta("Hel"),
+			textDelta("lo"),
+			completed(7, 0),
 		})
 	}))
 	defer srv.Close()
@@ -58,11 +90,11 @@ func TestChatStreamsContent(t *testing.T) {
 	if gotAuth != "Bearer sk-xyz" {
 		t.Fatalf("auth header missing: %q", gotAuth)
 	}
-	if !strings.Contains(gotBody, `"model":"test-model"`) {
-		t.Fatalf("model missing from request: %s", gotBody)
-	}
-	if !strings.Contains(gotBody, `"reasoning_effort":"medium"`) {
-		t.Fatalf("reasoning_effort must default to 'medium' (decode is the serialised critical path): %s", gotBody)
+	for _, want := range []string{`"model":"test-model"`, `"reasoning":{"effort":"medium"}`, `"store":false`, `"stream":true`,
+		`{"type":"message","role":"user","content":"hi"}`} {
+		if !strings.Contains(gotBody, want) {
+			t.Fatalf("request missing %s: %s", want, gotBody)
+		}
 	}
 
 	var content strings.Builder
@@ -92,89 +124,100 @@ func TestChatStreamsContent(t *testing.T) {
 	}
 }
 
-// TestChatToolCall: tool_calls in a delta emit EventToolCall and ride along in
-// EventDone.Final.ToolCalls so the next turn can replay the assistant message.
+// TestChatPostsToResponses pins the one endpoint the client speaks.
+func TestChatPostsToResponses(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		sseOK(w, []string{completed(0, 0)})
+	}))
+	defer srv.Close()
+	collect(New(srv.URL+"/", "m", "").Chat(context.Background(), nil, nil))
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", gotPath)
+	}
+}
+
+// TestChatToolCall: the canonical OpenAI shape - output_item.added, argument
+// deltas, arguments.done, output_item.done - resolves to one EventToolCall and
+// rides along in EventDone.Final.ToolCalls so the next round can replay it.
 func TestChatToolCall(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`,
+			callAdded(0, "call_1", "bash"),
+			argsDelta(0, `{"cmd"`),
+			argsDelta(0, `:"ls"}`),
+			`{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"cmd\":\"ls\"}"}`,
+			callDone(0, "call_1", "bash", `{"cmd":"ls"}`),
+			completed(5, 0),
 		})
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "m", "")
-	var got *chmctx.ToolCall
+	var calls []chmctx.ToolCall
 	var final *chmctx.Message
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		switch e.Kind {
 		case EventToolCall:
-			got = e.ToolCall
+			calls = append(calls, *e.ToolCall)
 		case EventDone:
 			final = e.Final
 		}
 	}
-	if got == nil || got.Name != "bash" {
-		t.Fatalf("tool call missing: %+v", got)
+	if len(calls) != 1 || calls[0].Name != "bash" || calls[0].ID != "call_1" {
+		t.Fatalf("want one bash call with call_id, got %+v", calls)
 	}
-	if cmd, _ := got.Arguments["cmd"].(string); cmd != "ls" {
-		t.Fatalf("tool args wrong: %+v", got.Arguments)
+	if cmd, _ := calls[0].Arguments["cmd"].(string); cmd != "ls" {
+		t.Fatalf("tool args wrong (done must replace, not append to, the deltas): %+v", calls[0].Arguments)
 	}
 	if final == nil || len(final.ToolCalls) != 1 || final.ToolCalls[0].Name != "bash" {
 		t.Fatalf("Final.ToolCalls should carry the bash call: %+v", final)
 	}
 }
 
-// TestChatToolCallFragmentedArgs: `arguments` arrives as JSON fragments, each
-// invalid alone. The client must accumulate raw and parse once at finish_reason.
-func TestChatToolCallFragmentedArgs(t *testing.T) {
+// TestChatToolCallFromDoneOnly: a server that streams no argument deltas and
+// no arguments.done (only the finished item) must still resolve the call.
+func TestChatToolCallFromDoneOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\":\"ls"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":6}}`,
+			callDone(0, "c1", "bash", `{"cmd":"ls"}`),
+			completed(5, 0),
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
 	var got *chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
 			got = e.ToolCall
 		}
 	}
-	if got == nil || got.Name != "bash" {
+	if got == nil || got.Name != "bash" || got.ID != "c1" {
 		t.Fatalf("tool call missing: %+v", got)
 	}
 	if cmd, _ := got.Arguments["cmd"].(string); cmd != "ls" {
-		t.Fatalf("fragmented args not reassembled - wanted cmd=ls, got %+v", got.Arguments)
-	}
-	if len(got.Arguments) != 1 {
-		t.Fatalf("expected exactly one parsed arg, got %+v", got.Arguments)
+		t.Fatalf("args wrong: %+v", got.Arguments)
 	}
 }
 
-// TestChatToolArgsStreamLive: each tool-call arguments fragment is forwarded as
-// an EventToolArgs as it arrives, so the UI can tick its live token estimate
-// while a file streams into write_file, not just once at stream end. Fragments
-// concatenate to the full arguments and all precede the resolved EventToolCall.
+// TestChatToolArgsStreamLive: each arguments delta is forwarded as EventToolArgs
+// as it arrives, so the UI can tick its live token estimate while a file
+// streams into write_file. Fragments concatenate to the full arguments and all
+// precede the resolved EventToolCall.
 func TestChatToolArgsStreamLive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".txt\",\"content\":\"hi"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			callAdded(0, "c1", "write_file"),
+			argsDelta(0, `{"path":"a`),
+			argsDelta(0, `.txt","content":"hi`),
+			argsDelta(0, `"}`),
+			callDone(0, "c1", "write_file", `{"path":"a.txt","content":"hi"}`),
+			completed(0, 0),
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
 	var args strings.Builder
-	sawCall := false
-	argsAllBeforeCall := true
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+	sawCall, argsAllBeforeCall := false, true
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		switch e.Kind {
 		case EventToolArgs:
 			args.WriteString(e.Content)
@@ -188,30 +231,30 @@ func TestChatToolArgsStreamLive(t *testing.T) {
 	if got := args.String(); got != `{"path":"a.txt","content":"hi"}` {
 		t.Fatalf("EventToolArgs fragments should concatenate to the full args, got %q", got)
 	}
-	if !sawCall {
-		t.Fatalf("expected a resolved EventToolCall after the fragments")
-	}
-	if !argsAllBeforeCall {
-		t.Fatalf("every EventToolArgs must precede the resolved EventToolCall")
+	if !sawCall || !argsAllBeforeCall {
+		t.Fatalf("every EventToolArgs must precede the resolved EventToolCall (sawCall=%v)", sawCall)
 	}
 }
 
-// TestChatToolCallMultipleByIndex: two tool calls interleaved across chunks.
-// Each fragment must route to its slot by `index`, not by slice position.
-func TestChatToolCallMultipleByIndex(t *testing.T) {
+// TestChatParallelToolCallsByOutputIndex: two calls interleaved across frames
+// route by output_index and resolve in output order.
+func TestChatParallelToolCallsByOutputIndex(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"python"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"cmd\":\"print()\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			callAdded(0, "c1", "read_file"),
+			callAdded(1, "c2", "read_file"),
+			argsDelta(0, `{"path":`),
+			argsDelta(1, `{"path":`),
+			argsDelta(0, `"a.go"}`),
+			argsDelta(1, `"b.go"}`),
+			callDone(0, "c1", "read_file", `{"path":"a.go"}`),
+			callDone(1, "c2", "read_file", `{"path":"b.go"}`),
+			completed(9, 0),
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
 	var calls []chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
 			calls = append(calls, *e.ToolCall)
 		}
@@ -219,76 +262,13 @@ func TestChatToolCallMultipleByIndex(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("want 2 tool-call events, got %d: %+v", len(calls), calls)
 	}
-	byName := map[string]map[string]any{}
-	for _, c := range calls {
-		byName[c.Name] = c.Arguments
-	}
-	if cmd, _ := byName["bash"]["cmd"].(string); cmd != "ls" {
-		t.Fatalf("bash args wrong: %+v", byName["bash"])
-	}
-	if cmd, _ := byName["python"]["cmd"].(string); cmd != "print()" {
-		t.Fatalf("python args wrong: %+v", byName["python"])
-	}
-}
-
-// TestChatDispatchesToolCallsOnFinishStop: Ollama's /v1 shim sometimes emits
-// finish_reason="stop" even after streaming tool_calls. The client must still
-// emit EventToolCall, or the call vanishes and the agent faces an empty turn.
-func TestChatDispatchesToolCallsOnFinishStop(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":5}}`,
-		})
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m", "")
-	var got *chmctx.ToolCall
-	var final *chmctx.Message
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		switch e.Kind {
-		case EventToolCall:
-			got = e.ToolCall
-		case EventDone:
-			final = e.Final
+	for i, want := range []string{"a.go", "b.go"} {
+		if got, _ := calls[i].Arguments["path"].(string); got != want {
+			t.Fatalf("call %d path = %q, want %q", i, got, want)
 		}
 	}
-	if got == nil || got.Name != "bash" {
-		t.Fatalf("tool call must emit on finish_reason=stop: %+v", got)
-	}
-	if cmd, _ := got.Arguments["cmd"].(string); cmd != "ls" {
-		t.Fatalf("args not carried through: %+v", got.Arguments)
-	}
-	if final == nil || len(final.ToolCalls) != 1 {
-		t.Fatalf("final should still carry the tool call: %+v", final)
-	}
-}
-
-// TestChatToolCallLateIDPreserved: spec ships the tool_call `id` in the first
-// fragment, but a sloppy provider may delay it. The client must update slot.id
-// on any non-empty value (same forgiveness as `name`), else the id stays "" and
-// the next /v1 request 400s on the unpaired tool message.
-func TestChatToolCallLateIDPreserved(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_late","function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
-		})
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m", "")
-	var got *chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventToolCall {
-			got = e.ToolCall
-		}
-	}
-	if got == nil {
-		t.Fatal("tool call event missing")
-	}
-	if got.ID != "call_late" {
-		t.Fatalf("late-arriving id lost: got %q, want %q", got.ID, "call_late")
+	if calls[0].ID != "c1" || calls[1].ID != "c2" {
+		t.Fatalf("output order lost: got ids %s, %s", calls[0].ID, calls[1].ID)
 	}
 }
 
@@ -298,14 +278,13 @@ func TestChatToolCallLateIDPreserved(t *testing.T) {
 func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{not-json"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			callDone(0, "c1", "bash", `{not-json`),
+			completed(0, 0),
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
 	var got *chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
 			got = e.ToolCall
 		}
@@ -318,57 +297,143 @@ func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 	}
 }
 
-// TestToWireAlwaysSendsContent: silent tool results (empty stdout) must still
-// serialize "content":"". Ollama's /v1 shim 400s if the field is absent or null.
-func TestToWireAlwaysSendsContent(t *testing.T) {
-	msgs := []chmctx.Message{
-		{Role: chmctx.RoleAssistant, Content: "", ToolCalls: []chmctx.ToolCall{
-			{ID: "c1", Name: "bash", Arguments: map[string]any{"cmd": "true"}},
-		}},
-		{Role: chmctx.RoleTool, Content: "", ToolCallID: "c1", ToolName: "bash"},
+// TestReasoningDeltasAreEmittedAndItemsKept: reasoning text streams as
+// EventReasoning (else the UI freezes for the whole thinking phase) and must
+// NOT fold into content; the finished reasoning ITEM is kept raw on the final
+// message so the next request can replay it verbatim.
+func TestReasoningDeltasAreEmittedAndItemsKept(t *testing.T) {
+	item := `{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"gAAAA=="}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sseOK(w, []string{
+			`{"type":"response.output_item.added","output_index":0,"item":` + item + `}`,
+			`{"type":"response.reasoning_text.delta","output_index":0,"delta":"Hmm"}`,
+			`{"type":"response.reasoning_summary_text.delta","output_index":0,"delta":" OK"}`,
+			`{"type":"response.output_item.done","output_index":0,"item":` + item + `}`,
+			textDelta("hi"),
+			completed(3, 0),
+		})
+	}))
+	defer srv.Close()
+
+	var reasoning, content string
+	var done Event
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
+		switch e.Kind {
+		case EventReasoning:
+			reasoning += e.Content
+		case EventContent:
+			content += e.Content
+		case EventDone:
+			done = e
+		}
 	}
-	buf, err := json.Marshal(toWire(msgs))
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	if reasoning != "Hmm OK" {
+		t.Fatalf("want reasoning %q, got %q", "Hmm OK", reasoning)
 	}
-	got := string(buf)
-	if !strings.Contains(got, `"role":"assistant","content":""`) {
-		t.Errorf("assistant with tool_calls must keep content field: %s", got)
+	if content != "hi" || done.Final == nil || done.Final.Content != "hi" {
+		t.Fatalf("reasoning must not leak into content: %q / %+v", content, done.Final)
 	}
-	if !strings.Contains(got, `"role":"tool","content":""`) {
-		t.Errorf("tool message with empty output must keep content field: %s", got)
+	if len(done.Final.Reasoning) != 1 || string(done.Final.Reasoning[0]) != item {
+		t.Fatalf("finished reasoning item must be kept verbatim (from output_item.done only, once): %s", done.Final.Reasoning)
+	}
+	if done.Tokens != 3 {
+		t.Fatalf("want 3 tokens, got %d", done.Tokens)
 	}
 }
 
-// TestChatSendsStreamIncludeUsage: servers emit the usage block only when
-// `stream_options.include_usage:true` is in the request; without it the per-turn
-// token counter sits at 0. Every Chat call must ship the flag.
-func TestChatSendsStreamIncludeUsage(t *testing.T) {
+// TestToInputShapes pins the wire mapping: system/user messages, an assistant
+// round as reasoning items + text + function_call items, tool results as
+// function_call_output with `output` always present (a silent bash command
+// yields an empty string, and the field may not be omitted).
+func TestToInputShapes(t *testing.T) {
+	msgs := []chmctx.Message{
+		{Role: chmctx.RoleSystem, Content: "be terse"},
+		{Role: chmctx.RoleUser, Content: "run it"},
+		{Role: chmctx.RoleAssistant, Content: "Running.", Reasoning: []json.RawMessage{json.RawMessage(`{"type":"reasoning","id":"rs_1"}`)},
+			ToolCalls: []chmctx.ToolCall{{ID: "c1", Name: "bash", Arguments: map[string]any{"cmd": "true"}}}},
+		{Role: chmctx.RoleTool, Content: "", ToolCallID: "c1", ToolName: "bash"},
+	}
+	buf, err := json.Marshal(toInput(msgs))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `[{"type":"message","role":"system","content":"be terse"},` +
+		`{"type":"message","role":"user","content":"run it"},` +
+		`{"type":"reasoning","id":"rs_1"},` +
+		`{"type":"message","role":"assistant","content":"Running."},` +
+		`{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"cmd\":\"true\"}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":""}]`
+	if string(buf) != want {
+		t.Fatalf("toInput =\n%s\nwant\n%s", buf, want)
+	}
+}
+
+// TestToInputSkipsEmptyTextBesideCallsAndOrphanReasoning: an assistant round
+// that only called tools sends no empty text item, and a round that produced
+// nothing at all sends its (now orphaned) reasoning nowhere - a reasoning item
+// with no following item is the one replay shape OpenAI rejects. The empty
+// message itself still goes, so history stays truthful.
+func TestToInputSkipsEmptyTextBesideCallsAndOrphanReasoning(t *testing.T) {
+	r := []json.RawMessage{json.RawMessage(`{"type":"reasoning","id":"rs_1"}`)}
+	buf, _ := json.Marshal(toInput([]chmctx.Message{
+		{Role: chmctx.RoleAssistant, Reasoning: r, ToolCalls: []chmctx.ToolCall{{ID: "c1", Name: "bash", Arguments: map[string]any{}}}},
+		{Role: chmctx.RoleAssistant, Reasoning: r},
+	}))
+	want := `[{"type":"reasoning","id":"rs_1"},` +
+		`{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},` +
+		`{"type":"message","role":"assistant","content":""}]`
+	if string(buf) != want {
+		t.Fatalf("toInput =\n%s\nwant\n%s", buf, want)
+	}
+}
+
+// TestToInputParseErrorArgsStayValidJSON: when resolve() stamps _parse_error
+// for a truncated tool call and that assistant message round-trips into the
+// next request, the arguments must still be VALID JSON. Otherwise every later
+// turn re-sends corrupt JSON and the backend 400s forever (session poisoning).
+func TestToInputParseErrorArgsStayValidJSON(t *testing.T) {
+	items := toInput([]chmctx.Message{{
+		Role: chmctx.RoleAssistant,
+		ToolCalls: []chmctx.ToolCall{{
+			ID:        "c1",
+			Name:      "write_file",
+			Arguments: map[string]any{"_parse_error": "unexpected end of JSON input"},
+		}},
+	}})
+	args := items[0].(functionCallItem).Arguments
+	if !json.Valid([]byte(args)) {
+		t.Fatalf("arguments must stay valid JSON to avoid poisoning the session: %q", args)
+	}
+}
+
+// TestChatToolsAreFlat: the Responses tool declaration has no `function`
+// wrapper; the old chat-completions nesting 400s here.
+func TestChatToolsAreFlat(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
-		sseOK(w, []string{`{"choices":[{"delta":{"content":"ok"}}]}`})
+		sseOK(w, []string{completed(0, 0)})
 	}))
 	defer srv.Close()
-	collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
-	if !strings.Contains(gotBody, `"stream_options":{"include_usage":true}`) {
-		t.Fatalf("stream_options.include_usage missing from body: %s", gotBody)
+	collect(New(srv.URL, "m", "").Chat(context.Background(), nil, []Tool{{
+		Type: "function", Name: "bash", Description: "run", Parameters: map[string]any{"type": "object"},
+	}}))
+	if !strings.Contains(gotBody, `"tools":[{"type":"function","name":"bash","description":"run","parameters":{"type":"object"}}]`) {
+		t.Fatalf("tools must be flat: %s", gotBody)
 	}
 }
 
-// TestChatMidStreamErrorFrameSurfacesAsError: OpenAI-compatible backends (and
-// OpenRouter-style proxies like the hosted endpoint) report a post-200
-// provider failure as a final `data: {"error":{...}}` frame followed by
-// connection close with no [DONE]. That frame must surface as EventError; left
-// undecoded it parses to zero choices, the close reads as clean EOF, and a
-// mid-sentence-truncated turn finalizes as a confident EventDone success.
+// TestChatMidStreamErrorFrameSurfacesAsError: OpenAI-compatible proxies report
+// a post-200 provider failure as a bare `data: {"error":{...}}` frame followed
+// by connection close. That frame must surface as EventError; left undecoded
+// the close reads as clean EOF and a truncated turn would be replayed or, worse,
+// finalized.
 func TestChatMidStreamErrorFrameSurfacesAsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n")
+		writeEvent(w, textDelta("partial answer"))
 		fmt.Fprint(w, "data: {\"error\":{\"code\":502,\"message\":\"Provider returned error\"}}\n\n")
-		// connection closes without [DONE]
 	}))
 	defer srv.Close()
 
@@ -376,11 +441,11 @@ func TestChatMidStreamErrorFrameSurfacesAsError(t *testing.T) {
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
 
 	last := events[len(events)-1]
-	if last.Kind != EventError {
-		t.Fatalf("stream must end in EventError, got kind %v (events: %+v)", last.Kind, events)
+	if last.Kind != EventError || !strings.Contains(last.Err.Error(), "Provider returned error") {
+		t.Fatalf("stream must end in EventError carrying the server's message, got %+v", last)
 	}
-	if !strings.Contains(last.Err.Error(), "Provider returned error") {
-		t.Fatalf("error must carry the server's message, got %v", last.Err)
+	if last.MidStream {
+		t.Fatal("a server-reported error must never be replayed: it would repeat forever")
 	}
 	for _, e := range events {
 		if e.Kind == EventDone {
@@ -389,49 +454,82 @@ func TestChatMidStreamErrorFrameSurfacesAsError(t *testing.T) {
 	}
 }
 
-// TestChatReadsUsageTokens: tokens come from `usage.completion_tokens` (and
-// prompt_tokens rides along for the debug-log calibration), not content
-// length; we trust what the backend reports.
+// TestChatFailedAndErrorEventsAreServerErrors: the two Responses-native
+// failure events carry the server's own diagnosis and are not replayable.
+func TestChatFailedAndErrorEventsAreServerErrors(t *testing.T) {
+	for name, frame := range map[string]string{
+		"response.failed": `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"context length exceeded"}}}`,
+		"error":           `{"type":"error","code":"server_error","message":"context length exceeded"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				sseOK(w, []string{textDelta("partial"), frame})
+			}))
+			defer srv.Close()
+			var errEvt *Event
+			for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
+				if e.Kind == EventError {
+					errEvt = &e
+				}
+			}
+			if errEvt == nil || !strings.Contains(errEvt.Err.Error(), "context length exceeded") {
+				t.Fatalf("want EventError with the server's message, got %+v", errEvt)
+			}
+			if errEvt.MidStream {
+				t.Fatal("a server-reported error must never be replayed")
+			}
+		})
+	}
+}
+
+// TestChatReadsUsageTokens: tokens come from response.completed's usage
+// (output_tokens; input_tokens rides along for the debug-log calibration), not
+// content length; we trust what the backend reports.
 func TestChatReadsUsageTokens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"` + strings.Repeat("x", 100) + `"}}],"usage":{"completion_tokens":7,"prompt_tokens":42}}`,
-		})
+		sseOK(w, []string{textDelta(strings.Repeat("x", 100)), completed(7, 42)})
 	}))
 	defer srv.Close()
 	var tokens, promptTokens int
 	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventDone {
-			tokens = e.Tokens
-			promptTokens = e.PromptTokens
+			tokens, promptTokens = e.Tokens, e.PromptTokens
 		}
 	}
-	if tokens != 7 {
-		t.Fatalf("expected tokens=7 from usage block, got %d", tokens)
+	if tokens != 7 || promptTokens != 42 {
+		t.Fatalf("want tokens=7 prompt=42 from usage, got %d/%d", tokens, promptTokens)
 	}
-	if promptTokens != 42 {
-		t.Fatalf("expected prompt_tokens=42 from usage block, got %d", promptTokens)
+}
+
+// TestChatIncompleteCompletesStream: response.incomplete (max_output_tokens,
+// content filter) is the model stopping on purpose; the partial text is a real
+// answer, not a dropped socket.
+func TestChatIncompleteCompletesStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sseOK(w, []string{
+			textDelta("cut off"),
+			`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":2}}}`,
+		})
+	}))
+	defer srv.Close()
+	events := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	last := events[len(events)-1]
+	if last.Kind != EventDone || last.Final == nil || last.Final.Content != "cut off" || last.Tokens != 2 {
+		t.Fatalf("incomplete is a completion signal; want EventDone with the text, got %+v", last)
 	}
 }
 
 // TestSendEventUnblocksOnCancel pins sendEvent's anti-wedge invariant: once the
 // parent context is cancelled, a send to an undrained channel must abort via the
-// <-parent.Done() arm instead of blocking the stream goroutine forever. This is
-// the only path exercising that arm. A regression to a plain `out <- e` leaks the
-// Chat goroutine on Ctrl+C against a full buffer; the goroutine never returns and
-// the deadline below fires.
+// <-parent.Done() arm instead of blocking the stream goroutine forever.
 func TestSendEventUnblocksOnCancel(t *testing.T) {
 	out := make(chan Event) // unbuffered, no reader → the send blocks until cancel
 	ctx, cancel := context.WithCancel(context.Background())
-
 	done := make(chan bool, 1)
 	go func() {
 		done <- sendEvent(ctx, out, Event{Kind: EventContent, Content: "nobody is reading me"})
 	}()
-
-	// The send is wedged (no reader on out); cancelling must release it.
 	cancel()
-
 	select {
 	case ok := <-done:
 		if ok {
@@ -456,10 +554,8 @@ func TestChat401(t *testing.T) {
 
 // TestChat401DrainsBodyForConnReuse: a 401 carrying a body must have that body
 // drained before close, or Go's transport discards the TCP connection instead
-// of returning it to the keep-alive pool. With the same client issuing two
-// sequential 401s, a drained body reuses one connection (one RemoteAddr); an
-// undrained one forces a fresh connection on the second request (two). The 402
-// and default error branches already drain; this pins the 401 branch to match.
+// of returning it to the keep-alive pool. Two sequential 401s on one client
+// must land on one connection.
 func TestChat401DrainsBodyForConnReuse(t *testing.T) {
 	var mu sync.Mutex
 	conns := map[string]bool{}
@@ -468,8 +564,6 @@ func TestChat401DrainsBodyForConnReuse(t *testing.T) {
 		conns[r.RemoteAddr] = true
 		mu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
-		// Non-empty body: an empty 401 is reusable regardless and would hide the
-		// regression. A real backend's 401 carries an error JSON like this.
 		fmt.Fprint(w, `{"error":{"message":"invalid api key"}}`)
 	}))
 	defer srv.Close()
@@ -485,7 +579,7 @@ func TestChat401DrainsBodyForConnReuse(t *testing.T) {
 	n := len(conns)
 	mu.Unlock()
 	if n != 1 {
-		t.Fatalf("401 body not drained: server saw %d connections across 2 sequential requests, want 1 (keep-alive reuse defeated)", n)
+		t.Fatalf("401 body not drained: server saw %d connections across 2 sequential requests, want 1", n)
 	}
 }
 
@@ -505,8 +599,7 @@ func TestChat402(t *testing.T) {
 	}
 }
 
-// TestChatUnreachable: transport failure surfaces as ErrUnreachable. Retries
-// off: this test pins the terminal error surface, not the retry path.
+// TestChatUnreachable: transport failure surfaces as ErrUnreachable.
 func TestChatUnreachable(t *testing.T) {
 	c := New("http://127.0.0.1:1", "m", "")
 	c.RetryBackoff = nil
@@ -521,8 +614,7 @@ func TestChatUnreachable(t *testing.T) {
 }
 
 // TestChatOtherHTTPError: non-2xx (not 401/402) surfaces as a generic error
-// carrying only the first body line. Retries off: this test pins the terminal
-// error surface, not the retry path.
+// carrying only the first body line.
 func TestChatOtherHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -536,8 +628,7 @@ func TestChatOtherHTTPError(t *testing.T) {
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
-	if !strings.Contains(evs[0].Err.Error(), "500") ||
-		!strings.Contains(evs[0].Err.Error(), "engine exploded") {
+	if !strings.Contains(evs[0].Err.Error(), "500") || !strings.Contains(evs[0].Err.Error(), "engine exploded") {
 		t.Fatalf("error should include status and body excerpt: %v", evs[0].Err)
 	}
 	if strings.Contains(evs[0].Err.Error(), "see logs") {
@@ -545,10 +636,29 @@ func TestChatOtherHTTPError(t *testing.T) {
 	}
 }
 
+// TestChat404NamesTheRequirement: a route miss is the one misconfiguration the
+// body never explains (a chat-completions-only server says just "not found"),
+// so the error names the Responses API and the server versions that ship it.
+// vLLM also 404s an unknown model; its message must survive in front.
+func TestChat404NamesTheRequirement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "{\"error\":{\"message\":\"The model `nope` does not exist.\",\"code\":404}}")
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "nope", "").Probe(context.Background())
+	if err == nil {
+		t.Fatal("404 must fail the probe")
+	}
+	for _, want := range []string{"404", "The model `nope` does not exist.", "/v1/responses", "Ollama 0.13.3"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("404 error should mention %q: %v", want, err)
+		}
+	}
+}
+
 // TestChatStructuredErrorPrefersProviderHint: the hamrpass proxy wraps upstream
-// errors as `{"error":{"message":...,"provider_hint":...}}`. The client must
-// surface provider_hint over message, so users see the useful "retry shortly"
-// text, not "upstream rate limited".
+// errors as `{"error":{"message":...,"provider_hint":...}}`; provider_hint wins.
 func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -557,24 +667,19 @@ func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "m", "")
-	c.RetryBackoff = nil // pin the terminal error surface, not the retry path
+	c.RetryBackoff = nil
 	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
-	if !strings.Contains(evs[0].Err.Error(), "429") {
-		t.Fatalf("error should include upstream status: %v", evs[0].Err)
-	}
-	if !strings.Contains(evs[0].Err.Error(), "retry shortly") {
-		t.Fatalf("error should surface provider_hint: %v", evs[0].Err)
-	}
-	if strings.Contains(evs[0].Err.Error(), "upstream rate limited") {
-		t.Fatalf("provider_hint should win over message: %v", evs[0].Err)
+	msg := evs[0].Err.Error()
+	if !strings.Contains(msg, "429") || !strings.Contains(msg, "retry shortly") || strings.Contains(msg, "upstream rate limited") {
+		t.Fatalf("provider_hint should win over message, with the status: %v", msg)
 	}
 }
 
-// TestChatStructuredErrorFallsBackToMessage: with only `error.message` (no
-// provider_hint), surface that, not the raw JSON envelope.
+// TestChatStructuredErrorFallsBackToMessage: with only `error.message`, surface
+// that, not the raw JSON envelope.
 func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -583,188 +688,104 @@ func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "m", "")
-	c.RetryBackoff = nil // pin the terminal error surface, not the retry path
+	c.RetryBackoff = nil
 	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
-	if !strings.Contains(evs[0].Err.Error(), "503") ||
-		!strings.Contains(evs[0].Err.Error(), "upstream unavailable") {
-		t.Fatalf("error should include status and message: %v", evs[0].Err)
-	}
-	if strings.Contains(evs[0].Err.Error(), `{"error"`) {
-		t.Fatalf("raw envelope JSON must not leak through to the user: %v", evs[0].Err)
+	msg := evs[0].Err.Error()
+	if !strings.Contains(msg, "503") || !strings.Contains(msg, "upstream unavailable") || strings.Contains(msg, `{"error"`) {
+		t.Fatalf("error should carry status and message, never the raw envelope: %v", msg)
 	}
 }
 
-// TestReasoningChunksAreEmitted: reasoning models stream chain-of-thought in
-// `delta.reasoning`. The decoder must surface these as EventReasoning (else the
-// UI freezes for the whole reasoning phase) and must NOT fold them into the
-// assistant content: reasoning has no business in history.
-func TestReasoningChunksAreEmitted(t *testing.T) {
-	chunks := []string{
-		`{"choices":[{"delta":{"reasoning":"Hmm"},"finish_reason":null}]}`,
-		`{"choices":[{"delta":{"reasoning":" OK"},"finish_reason":null}]}`,
-		`{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
-		`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}`,
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sseOK(w, chunks)
-	}))
-	defer srv.Close()
+// TestChatFallsBackWhenReasoningRejected: each dialect's refusal of the
+// reasoning effort - Ollama's non-thinking model, vLLM's scale without our
+// value, OpenAI's non-reasoning model - drops the field, retries once, and
+// stays sticky for the Client's life so later turns don't burn a 400 each.
+func TestChatFallsBackWhenReasoningRejected(t *testing.T) {
+	for name, body := range map[string]string{
+		"ollama": `{"error":"\"test-model:latest\" does not support thinking"}`,
+		"vllm":   `{"error":{"message":"Unexpected reasoning effort medium. Supported types are xhigh (default), high, and low.","type":"BadRequestError","param":null,"code":400}}`,
+		"openai": `{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_parameter"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var bodies []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, string(b))
+				if strings.Contains(string(b), `"reasoning"`) {
+					w.WriteHeader(400)
+					fmt.Fprintln(w, body)
+					return
+				}
+				sseOK(w, []string{textDelta("ok"), completed(1, 0)})
+			}))
+			defer srv.Close()
 
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
-	var reasoning, content string
-	var done Event
-	for _, e := range evs {
-		switch e.Kind {
-		case EventReasoning:
-			reasoning += e.Content
-		case EventContent:
-			content += e.Content
-		case EventDone:
-			done = e
-		}
-	}
-	if reasoning != "Hmm OK" {
-		t.Fatalf("want reasoning %q, got %q", "Hmm OK", reasoning)
-	}
-	if content != "hi" {
-		t.Fatalf("want content %q, got %q", "hi", content)
-	}
-	if done.Final == nil || done.Final.Content != "hi" {
-		t.Fatalf("reasoning must not leak into final message content: %+v", done.Final)
-	}
-	if done.Tokens != 3 {
-		t.Fatalf("want 3 tokens, got %d", done.Tokens)
+			c := New(srv.URL, "test-model", "")
+			for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+				if e.Kind == EventError {
+					t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
+				}
+			}
+			if len(bodies) != 2 || !strings.Contains(bodies[0], `"reasoning"`) || strings.Contains(bodies[1], `"reasoning"`) {
+				t.Fatalf("first turn should send reasoning, then retry without it: %v", bodies)
+			}
+			bodies = nil
+			for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+				if e.Kind == EventError {
+					t.Fatalf("second turn must not error: %v", e.Err)
+				}
+			}
+			if len(bodies) != 1 || strings.Contains(bodies[0], `"reasoning"`) {
+				t.Fatalf("second turn should make exactly 1 request without reasoning: %v", bodies)
+			}
+		})
 	}
 }
 
-// TestChatFallsBackWhenReasoningEffortRejected: newer OpenAI models reject tools +
-// reasoning_effort on /v1/chat/completions with a 400. postChat must drop the
-// field, retry once, and stay sticky for the Client's life, else every turn
-// burns a 400.
-func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
+// TestChatDoesNotFallBackOnUnrelatedThinking: a 400 that is NOT about reasoning
+// but happens to mention "thinking" must not trip the fallback. Otherwise the
+// match burns a wasted retry and latches reasoning off for the Client's whole
+// life on an error that had nothing to do with it.
+func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(b))
-		if strings.Contains(string(b), `"reasoning_effort"`) {
-			w.WriteHeader(400)
-			fmt.Fprintln(w, `{`)
-			fmt.Fprintln(w, `  "error": {`)
-			fmt.Fprintln(w, `    "message": "Function tools with reasoning_effort are not supported for this model in /v1/chat/completions. Please use /v1/responses instead.",`)
-			fmt.Fprintln(w, `    "param": "reasoning_effort"`)
-			fmt.Fprintln(w, `  }`)
-			fmt.Fprintln(w, `}`)
-			return
-		}
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
-		})
+		w.WriteHeader(400)
+		fmt.Fprintln(w, `{"error":{"message":"the requested tool format is not supported","provider_hint":"thinking about it differently won't help"}}`)
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "cloud-model", "")
-
-	// First turn: 400 → fallback → success.
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
-	}
-	if !strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("first attempt should send reasoning_effort: %s", bodies[0])
-	}
-	if strings.Contains(bodies[1], `"reasoning_effort"`) {
-		t.Fatalf("retry must drop reasoning_effort: %s", bodies[1])
-	}
-
-	// Second turn on the same Client: flag is sticky, no 400, no retry.
-	bodies = nil
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("second turn must not error: %v", e.Err)
-		}
-	}
+	c := New(srv.URL, "some-model", "")
+	collect(c.Chat(context.Background(), nil, nil))
 	if len(bodies) != 1 {
-		t.Fatalf("second turn should make exactly 1 request, got %d", len(bodies))
+		t.Fatalf("unrelated 400 must NOT trigger a fallback retry; got %d requests", len(bodies))
 	}
-	if strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("second turn must not resend reasoning_effort: %s", bodies[0])
-	}
-}
-
-// TestChatFallsBackToNoneWhenServerDemandsIt: from GPT-5.4 on, OpenAI's
-// default effort is a real level, so a retry that merely omits the field 400s
-// identically ("set reasoning_effort to 'none'"). The fallback must send the
-// value the message names, and keep sending it on later turns.
-func TestChatFallsBackToNoneWhenServerDemandsIt(t *testing.T) {
-	var bodies []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(b))
-		if !strings.Contains(string(b), `"reasoning_effort":"none"`) {
-			w.WriteHeader(400)
-			fmt.Fprint(w, `{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","param":"reasoning_effort"}}`)
-			return
-		}
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
-		})
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, "gpt-6-astra", "")
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
-	}
-	if !strings.Contains(bodies[1], `"reasoning_effort":"none"`) {
-		t.Fatalf("retry must send reasoning_effort none, not omit it: %s", bodies[1])
-	}
-
-	bodies = nil
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("second turn must not error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 1 || !strings.Contains(bodies[0], `"reasoning_effort":"none"`) {
-		t.Fatalf("second turn should make 1 request with none pinned, got %v", bodies)
+	if c.noReasoning.Load() {
+		t.Fatal("reasoning must not latch off on a 400 unrelated to reasoning")
 	}
 }
 
-// TestProbeChatNoReasoningEffortIsRaceFree pins the atomic guard on
-// Client.reasoningFallback. The startup probe and the first chat can run on the
-// same *Client concurrently (probe from Init, chat when the user submits early):
-// both read the flag via postChat, and a 400 fallback writes it. A plain bool
-// would be a data race; this must run clean under -race.
-func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
+// TestProbeChatNoReasoningIsRaceFree pins the atomic guard on
+// Client.noReasoning. The startup probe and the first chat can run on the same
+// *Client concurrently: both read the flag via post, and a 400 fallback writes
+// it. A plain bool would be a data race; this must run clean under -race.
+func TestProbeChatNoReasoningIsRaceFree(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		// Force the 400 → write-the-flag branch on every chat still shipping
-		// reasoning_effort, so concurrent Chat goroutines hit the write path.
-		if strings.Contains(string(b), `"reasoning_effort"`) {
+		if strings.Contains(string(b), `"reasoning"`) {
 			w.WriteHeader(400)
-			fmt.Fprint(w, `{"error":{"message":"reasoning_effort not supported"}}`)
+			fmt.Fprint(w, `{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model."}}`)
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		sseOK(w, []string{textDelta("ok"), completed(1, 0)})
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "m", "")
-
 	var wg sync.WaitGroup
 	for range 50 {
 		wg.Add(2)
@@ -774,156 +795,40 @@ func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			for range c.Chat(context.Background(), nil, nil) {
-			}
+			collect(c.Chat(context.Background(), nil, nil))
 		}()
 	}
 	wg.Wait()
 }
 
-// TestChatFallsBackWhenOllamaRejectsThinking: Ollama rejects reasoning_effort on
-// non-thinking models with a 400 saying `<model> does not support thinking`:
-// different shape from OpenAI's message, same remedy. postChat must drop the
-// field, retry once, and stay sticky so we don't re-trip the 400 every turn.
-func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
-	var bodies []string
+// TestProbeSendsMinimalRequest: the probe is a hello with no tools and no
+// reasoning (so its 400 can never trip the fallback), and it reads the live
+// window and budget off the headers.
+func TestProbeSendsMinimalRequest(t *testing.T) {
+	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(b))
-		if strings.Contains(string(b), `"reasoning_effort"`) {
-			w.WriteHeader(400)
-			fmt.Fprintln(w, `{"error":"\"test-model:latest\" does not support thinking"}`)
-			return
-		}
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
-		})
+		gotBody = string(b)
+		w.Header().Set("X-Context-Window", "131072")
+		sseOK(w, []string{completed(0, 0)})
 	}))
 	defer srv.Close()
-
-	c := New(srv.URL, "test-model:latest", "")
-
-	// First turn: 400 → fallback → success.
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
-		}
+	res, err := New(srv.URL, "m", "k").Probe(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(bodies) != 2 {
-		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
+	if strings.Contains(gotBody, `"reasoning"`) || strings.Contains(gotBody, `"tools"`) {
+		t.Fatalf("probe must send neither reasoning nor tools: %s", gotBody)
 	}
-	if !strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("first attempt should send reasoning_effort: %s", bodies[0])
-	}
-	if strings.Contains(bodies[1], `"reasoning_effort"`) {
-		t.Fatalf("retry must drop reasoning_effort: %s", bodies[1])
-	}
-
-	// Second turn on the same Client: flag is sticky, no 400, no retry.
-	bodies = nil
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("second turn must not error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 1 {
-		t.Fatalf("second turn should make exactly 1 request, got %d", len(bodies))
-	}
-	if strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("second turn must not resend reasoning_effort: %s", bodies[0])
-	}
-}
-
-// TestChatFallsBackWhenEffortValueUnsupported: models that define their own
-// effort scale 400 on a value outside it. Qwen3.8 (vLLM) ships xhigh/medium/low
-// and has no `high`, the exact value Chat sends, so every turn died on a 400
-// while the two older rejection shapes sailed past the matcher. Body is the
-// server's verbatim response. Same remedy: drop the field, retry once, stay
-// sticky — the server then applies its own default (xhigh here).
-func TestChatFallsBackWhenEffortValueUnsupported(t *testing.T) {
-	var bodies []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(b))
-		if strings.Contains(string(b), `"reasoning_effort"`) {
-			w.WriteHeader(400)
-			fmt.Fprintln(w, `{"error":{"message":"Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.","type":"BadRequestError","param":null,"code":400}}`)
-			return
-		}
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
-		})
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, "Qwen3.8-27B", "")
-
-	// First turn: 400 → fallback → success.
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
-	}
-	if !strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("first attempt should send reasoning_effort: %s", bodies[0])
-	}
-	if strings.Contains(bodies[1], `"reasoning_effort"`) {
-		t.Fatalf("retry must drop reasoning_effort: %s", bodies[1])
-	}
-
-	// Second turn on the same Client: flag is sticky, no 400, no retry.
-	bodies = nil
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			t.Fatalf("second turn must not error: %v", e.Err)
-		}
-	}
-	if len(bodies) != 1 {
-		t.Fatalf("second turn should make exactly 1 request, got %d", len(bodies))
-	}
-	if strings.Contains(bodies[0], `"reasoning_effort"`) {
-		t.Fatalf("second turn must not resend reasoning_effort: %s", bodies[0])
-	}
-}
-
-// TestChatDoesNotFallBackOnUnrelatedThinking: a 400 that is NOT about reasoning
-// but happens to contain both "not support" and the word "thinking" must not
-// trip the reasoning_effort fallback. Otherwise the bare-"thinking" match
-// burns a wasted retry and latches reasoning off for the Client's whole life on
-// an error that had nothing to do with reasoning. The retry would resend the
-// same (still-failing) request, so we'd see a second request and a sticky flag.
-func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
-	var bodies []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		bodies = append(bodies, string(b))
-		// Unrelated 400: the tool format is unsupported; "thinking" appears only
-		// incidentally in the human-readable hint, not as a reasoning rejection.
-		w.WriteHeader(400)
-		fmt.Fprintln(w, `{"error":{"message":"the requested tool format is not supported","provider_hint":"thinking about it differently won't help"}}`)
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, "some-model", "")
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		_ = e // the turn errors (the 400 is real), that's expected
-	}
-	if len(bodies) != 1 {
-		t.Fatalf("unrelated 400 must NOT trigger a fallback retry; got %d requests", len(bodies))
-	}
-	if c.reasoningFallback.Load() != nil {
-		t.Fatal("reasoning must not latch off on a 400 unrelated to reasoning")
+	if res.ContextWindow != 131072 || !res.Budget.Set || res.Budget.Remaining != 0.73 {
+		t.Fatalf("probe should harvest headers: %+v", res)
 	}
 }
 
 // TestNewHasNoHTTPTimeout pins that the streaming Client must NOT set
 // http.Client.Timeout: that field is end-to-end (it covers body reads) and would
-// abort a legitimately slow SSE stream with "context deadline exceeded … while
-// reading body" on slow local backends. Per-turn context cancellation governs
-// request lifetime; this stops a refactor from reintroducing the wall-clock cap.
+// abort a legitimately slow SSE stream. Per-turn context cancellation governs
+// request lifetime.
 func TestNewHasNoHTTPTimeout(t *testing.T) {
 	c := New("http://example.test", "model", "token")
 	if c.HTTP.Timeout != 0 {
@@ -933,8 +838,7 @@ func TestNewHasNoHTTPTimeout(t *testing.T) {
 
 // TestIdleTimeoutFromEnv pins the CODEHAMR_IDLE_TIMEOUT contract: a Go duration
 // or bare-seconds string wins, anything else (unset, garbage, non-positive)
-// falls back to the default. The default is deliberately generous because this
-// is a dead-connection detector, not a loop guard.
+// falls back to the default.
 func TestIdleTimeoutFromEnv(t *testing.T) {
 	cases := []struct {
 		val  string
@@ -970,13 +874,13 @@ func TestIdleTimeoutFromEnv(t *testing.T) {
 // TestChatIdleTimeoutAbortsStalledStream reproduces the exact hang: the server
 // returns 200 OK then sends nothing. Without the idle watchdog scanner.Scan()
 // blocks forever; with it, the body is closed and the turn ends in an EventError
-// naming the stall, a finite escape that doesn't need Ctrl+C.
+// naming the stall.
 func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		w.(http.Flusher).Flush() // headers out so Client.Do returns; then go silent
-		<-r.Context().Done()     // hang until the client gives up and closes the body
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
 	}))
 	defer srv.Close()
 
@@ -990,11 +894,8 @@ func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 			gotErr = e.Err
 		}
 	}
-	if gotErr == nil {
-		t.Fatal("expected an EventError from the idle watchdog")
-	}
-	if !strings.Contains(gotErr.Error(), "stopped sending") {
-		t.Fatalf("error should name the stall: %v", gotErr)
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "stopped sending") {
+		t.Fatalf("expected an EventError naming the stall, got %v", gotErr)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("watchdog fired too late (%v) - should be ~IdleTimeout", elapsed)
@@ -1003,21 +904,17 @@ func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 
 // TestChatIdleWatchdogResetByFrames pins that an alive-but-slow stream is NOT
 // aborted: frames spaced under the idle window each reset the watchdog, so a
-// stream whose total span exceeds one window still completes. Guards against a
-// regression where onFrame() stops resetting the timer.
+// stream whose total span exceeds one window still completes.
 func TestChatIdleWatchdogResetByFrames(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flush := w.(http.Flusher)
-		for _, c := range []string{
-			`{"choices":[{"delta":{"content":"A"}}]}`,
-			`{"choices":[{"delta":{"content":"B"}}]}`,
-		} {
-			fmt.Fprintf(w, "data: %s\n\n", c)
+		for _, s := range []string{"A", "B"} {
+			writeEvent(w, textDelta(s))
 			flush.Flush()
 			time.Sleep(250 * time.Millisecond) // < IdleTimeout, so the watchdog resets
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		writeEvent(w, completed(0, 0))
 		flush.Flush()
 	}))
 	defer srv.Close()
@@ -1039,30 +936,9 @@ func TestChatIdleWatchdogResetByFrames(t *testing.T) {
 	}
 }
 
-// TestToWireParseErrorArgsStayValidJSON: when resolve() stamps _parse_error for a
-// truncated tool call and that assistant message round-trips into the next
-// request, toWire must still emit VALID JSON for arguments. Otherwise every
-// later turn re-sends corrupt JSON and the backend 400s forever (session
-// poisoning). The protection is re-marshalling the parsed map, never raw bytes.
-func TestToWireParseErrorArgsStayValidJSON(t *testing.T) {
-	msgs := []chmctx.Message{{
-		Role: chmctx.RoleAssistant,
-		ToolCalls: []chmctx.ToolCall{{
-			ID:        "c1",
-			Name:      "write_file",
-			Arguments: map[string]any{"_parse_error": "unexpected end of JSON input"},
-		}},
-	}}
-	args := toWire(msgs)[0].ToolCalls[0].Function.Arguments
-	if !json.Valid([]byte(args)) {
-		t.Fatalf("arguments must stay valid JSON to avoid poisoning the session: %q", args)
-	}
-}
-
 // TestChatRetriesTransient404: a proxy that hiccups (two 404s, then a clean
 // stream) is retried transparently. The user sees one EventRetry per wait,
-// then normal content — never an EventError. Pins the issue-#7 fix: LiteLLM
-// fronting Agnes AI emits transient 404s and the turn used to die on the first.
+// then normal content - never an EventError.
 func TestChatRetriesTransient404(t *testing.T) {
 	attempts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1072,7 +948,7 @@ func TestChatRetriesTransient404(t *testing.T) {
 			fmt.Fprint(w, `{"detail":"Not Found"}`)
 			return
 		}
-		sseOK(w, []string{`{"choices":[{"delta":{"content":"ok"}}]}`})
+		sseOK(w, []string{textDelta("ok"), completed(0, 0)})
 	}))
 	defer srv.Close()
 
@@ -1099,17 +975,13 @@ func TestChatRetriesTransient404(t *testing.T) {
 			t.Fatalf("recovered turn must not surface an error: %v", e.Err)
 		}
 	}
-	if retries != 2 {
-		t.Fatalf("retry events = %d, want 2", retries)
-	}
-	if !sawDone {
-		t.Fatal("no done event after successful retry")
+	if retries != 2 || !sawDone {
+		t.Fatalf("retry events = %d (want 2), done = %v", retries, sawDone)
 	}
 }
 
 // TestChatRetryGivesUpAfterBackoffExhausted: a permanently failing backend gets
-// len(RetryBackoff) retries, then the last error surfaces and the turn unwinds
-// back to the user.
+// len(RetryBackoff) retries, then the last error surfaces.
 func TestChatRetryGivesUpAfterBackoffExhausted(t *testing.T) {
 	attempts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1132,7 +1004,7 @@ func TestChatRetryGivesUpAfterBackoffExhausted(t *testing.T) {
 	}
 }
 
-// TestChatDoesNotRetryPermanentErrors: auth (401), depleted pass (402), and
+// TestChatDoesNotRetryPermanentErrors: auth (401), forbidden (403), and
 // malformed request (400) fail identically on every resend; exactly one
 // attempt, straight to EventError.
 func TestChatDoesNotRetryPermanentErrors(t *testing.T) {
@@ -1159,8 +1031,7 @@ func TestChatDoesNotRetryPermanentErrors(t *testing.T) {
 }
 
 // TestChatRetryWaitCancelable: Ctrl+C during a backoff wait must unwind the
-// turn immediately, not after the remaining sleep. The wait select must have a
-// parent.Done() arm.
+// turn immediately, not after the remaining sleep.
 func TestChatRetryWaitCancelable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1177,7 +1048,7 @@ func TestChatRetryWaitCancelable(t *testing.T) {
 	}()
 
 	start := time.Now()
-	collect(ch) // channel must close promptly once cancel fires
+	collect(ch)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("retry wait ignored cancellation: channel closed after %s", elapsed)
 	}
@@ -1212,8 +1083,7 @@ func TestRetryableClassification(t *testing.T) {
 }
 
 // TestProbeDoesNotRetry: the startup probe exists for fast feedback on a
-// misconfigured URL/model/key; it must fail on the first response, never sit
-// out retry backoffs.
+// misconfigured URL/model/key; it must fail on the first response.
 func TestProbeDoesNotRetry(t *testing.T) {
 	attempts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1231,131 +1101,34 @@ func TestProbeDoesNotRetry(t *testing.T) {
 	}
 }
 
-// TestChatParallelToolCallsSharedIndex: a backend that emits index 0 for every
-// call in a parallel batch must still resolve N distinct calls. Concatenating
-// their argument bodies into one slot yields a single _parse_error, which is
-// how a batched round degrades into a stalled turn on exactly the local
-// servers this project targets.
-func TestChatParallelToolCallsSharedIndex(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\":\"b.go\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":9}}`,
-		})
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m", "")
-	var calls []chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventToolCall {
-			calls = append(calls, *e.ToolCall)
-		}
-	}
-	if len(calls) != 2 {
-		t.Fatalf("shared-index parallel batch resolved %d calls, want 2: %+v", len(calls), calls)
-	}
-	for i, want := range []string{"a.go", "b.go"} {
-		if got, _ := calls[i].Arguments["path"].(string); got != want {
-			t.Fatalf("call %d path = %q, want %q (args: %+v)", i, got, want, calls[i].Arguments)
-		}
-	}
-}
-
-// TestChatMidStreamDropIsReplayable / ...ServerErrorIsNot: the TUI replays a
-// dropped socket but must never replay the server's own refusal, which would
-// repeat forever.
+// TestChatMidStreamDropIsReplayable: a socket dropped after a delivered frame
+// is a transport failure the TUI may replay.
 func TestChatMidStreamDropIsReplayable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		writeEvent(w, textDelta("partial"))
 		w.(http.Flusher).Flush()
-		srv2, _, _ := w.(http.Hijacker).Hijack()
-		srv2.Close() // drop the socket mid-stream
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close() // drop the socket mid-stream
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
 	var errEvt *Event
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventError {
 			errEvt = &e
 		}
 	}
-	if errEvt == nil {
-		t.Fatal("expected an EventError for a dropped stream")
-	}
-	if !errEvt.MidStream {
-		t.Fatalf("a drop after a delivered frame must be replayable: %v", errEvt.Err)
-	}
-}
-
-func TestChatServerStreamErrorIsNotReplayable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"content":"partial"}}]}`,
-			`{"error":{"message":"context length exceeded"}}`,
-		})
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m", "")
-	var errEvt *Event
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventError {
-			errEvt = &e
-		}
-	}
-	if errEvt == nil {
-		t.Fatal("expected an EventError for a server-reported stream error")
-	}
-	if errEvt.MidStream {
-		t.Fatal("a server-reported error must never be replayed: it would repeat forever")
-	}
-}
-
-// TestChatParallelToolCallsSharedIndexFragmented: the shared-index case with
-// FRAGMENTED arguments. The continuation fragments carry the shared index and
-// no id, so they must reach the call currently being streamed, not the earlier
-// one parked under it. Getting this backwards silently welds one call's
-// arguments onto another - valid JSON in, garbage out.
-func TestChatParallelToolCallsSharedIndexFragmented(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		sseOK(w, []string{
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.go\"}"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b.go\"}"}}]}}]}`,
-			`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":9}}`,
-		})
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m", "")
-	var calls []chmctx.ToolCall
-	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
-		if e.Kind == EventToolCall {
-			calls = append(calls, *e.ToolCall)
-		}
-	}
-	if len(calls) != 2 {
-		t.Fatalf("fragmented shared-index batch resolved %d calls, want 2: %+v", len(calls), calls)
-	}
-	for i, want := range []string{"a.go", "b.go"} {
-		if got, _ := calls[i].Arguments["path"].(string); got != want {
-			t.Fatalf("call %d (id %s) path = %q, want %q", i, calls[i].ID, got, want)
-		}
-	}
-	if calls[0].ID != "c1" || calls[1].ID != "c2" {
-		t.Fatalf("emission order lost: got ids %s, %s", calls[0].ID, calls[1].ID)
+	if errEvt == nil || !errEvt.MidStream {
+		t.Fatalf("a drop after a delivered frame must be replayable: %+v", errEvt)
 	}
 }
 
 // TestKeepaliveDoesNotCollapseThePrefillWindow: a proxy that emits one comment
-// or blank line at 200 OK (LiteLLM/nginx SSE shims, OpenRouter's ": OPENROUTER
-// PROCESSING") is liveness, not output. Treating it as output would (a) swap the
-// long prefill window for the short inter-frame one while the model is still
-// prefilling, and (b) mark the resulting DETERMINISTIC prefill stall as a
-// replayable mid-stream drop - so the TUI would replay the same doomed prefill
-// twice more before showing the user anything.
+// or blank line at 200 OK is liveness, not output. Treating it as output would
+// swap the long prefill window for the short inter-frame one while the model is
+// still prefilling, and mark the resulting DETERMINISTIC prefill stall as a
+// replayable drop. An `event:` name line without its data is liveness too.
 func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1364,7 +1137,8 @@ func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
 	}{
 		{"keepalive comment then silence", ": OPENROUTER PROCESSING\n\n", false},
 		{"blank line then silence", "\n", false},
-		{"real data frame then silence", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", true},
+		{"event name then silence", "event: response.created\n", false},
+		{"real data frame then silence", "data: " + textDelta("hi") + "\n\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1372,8 +1146,6 @@ func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, tc.preamble)
 				w.(http.Flusher).Flush()
-				// Go silent until the watchdog closes the body: an alive-but-mute
-				// server, which is what a prefill looks like from out here.
 				<-r.Context().Done()
 			}))
 			defer srv.Close()
@@ -1396,18 +1168,15 @@ func TestKeepaliveDoesNotCollapseThePrefillWindow(t *testing.T) {
 	}
 }
 
-// TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop: a proxy/LB that
-// gracefully closes the upstream mid-generation produces a clean EOF with no
-// [DONE], no finish_reason, and no usage frame. That must surface as a
-// MidStream EventError (so the TUI's bounded replay re-issues the request),
-// never as EventDone: finalizing it hands the turn a mid-sentence-truncated
-// assistant message as a clean finish - a transport-level false green no
-// nudge can see.
-func TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop(t *testing.T) {
+// TestChatCleanEOFWithoutCompletionIsMidStreamDrop: a proxy/LB that gracefully
+// closes the upstream mid-generation produces a clean EOF with no
+// response.completed. That must surface as a MidStream EventError (so the TUI's
+// bounded replay re-issues the request), never as EventDone: finalizing it
+// hands the turn a mid-sentence-truncated assistant message as a clean finish.
+func TestChatCleanEOFWithoutCompletionIsMidStreamDrop(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial ans\"}}]}\n\n")
-		// connection closes cleanly: no [DONE], no finish_reason, no usage
+		writeEvent(w, textDelta("partial ans"))
 	}))
 	defer srv.Close()
 
@@ -1415,11 +1184,8 @@ func TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop(t *testing.T) {
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
 
 	last := events[len(events)-1]
-	if last.Kind != EventError {
-		t.Fatalf("signal-less EOF must end in EventError, got kind %v (events: %+v)", last.Kind, events)
-	}
-	if !last.MidStream {
-		t.Fatalf("frames arrived before the cut, so the drop must be replayable (MidStream), got %v", last.Err)
+	if last.Kind != EventError || !last.MidStream {
+		t.Fatalf("completion-less EOF must end in a replayable EventError, got %+v", last)
 	}
 	for _, e := range events {
 		if e.Kind == EventDone {
@@ -1428,27 +1194,29 @@ func TestChatCleanEOFWithoutCompletionSignalIsMidStreamDrop(t *testing.T) {
 	}
 }
 
-// TestChatFinishReasonAloneCompletesStream: a backend that omits [DONE] but
-// closes its last frame with a finish_reason (any value - Ollama's shim emits
-// "stop" even after tool calls) finished on purpose; the turn must complete
-// cleanly, not be treated as a drop.
-func TestChatFinishReasonAloneCompletesStream(t *testing.T) {
+// TestChatIgnoresLifecycleChatterAndStrayDone: response.created, in_progress,
+// content_part.*, reasoning_part.* and a translation proxy's trailing
+// `data: [DONE]` carry nothing we act on and must neither error nor leak into
+// content.
+func TestChatIgnoresLifecycleChatterAndStrayDone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done answer\"}}]}\n\n")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
-		// no [DONE], no usage
+		sseOK(w, []string{
+			`{"type":"response.created","response":{"status":"in_progress"}}`,
+			`{"type":"response.in_progress","response":{"status":"in_progress"}}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`,
+			`{"type":"response.content_part.added","output_index":0,"part":{"type":"output_text","text":""}}`,
+			textDelta("ok"),
+			`{"type":"response.output_text.done","output_index":0,"text":"ok"}`,
+			`{"type":"response.content_part.done","output_index":0}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`,
+			completed(1, 0),
+		})
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
-
-	events := collect(New(srv.URL, "m", "").Chat(context.Background(),
-		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
-
+	events := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
 	last := events[len(events)-1]
-	if last.Kind != EventDone {
-		t.Fatalf("finish_reason is a completion signal; want EventDone, got kind %v (err: %v)", last.Kind, last.Err)
-	}
-	if last.Final == nil || last.Final.Content != "done answer" {
-		t.Fatalf("final message must carry the streamed content, got %+v", last.Final)
+	if last.Kind != EventDone || last.Final == nil || last.Final.Content != "ok" || len(last.Final.ToolCalls) != 0 || len(last.Final.Reasoning) != 0 {
+		t.Fatalf("want a clean EventDone with content ok and nothing else, got %+v", last)
 	}
 }

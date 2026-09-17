@@ -132,9 +132,8 @@ func TestQueueAutoSubmitsAfterTurn(t *testing.T) {
 		round++
 		buf, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(buf))
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"reply"}}]}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"reply"}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`)
 	}
 	m := newTestModel(t, handler)
 	mm, cmd := m.submit("first", "first", promptEntry{display: "first"})

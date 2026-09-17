@@ -1,6 +1,7 @@
 package ctx
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -50,6 +51,17 @@ func TestMessageTokensCountsToolCallArguments(t *testing.T) {
 	// args add Tokens("cmd")=1 + Tokens(fmt.Sprint("echo hello world"))=4 = 5.
 	if got := withArgs - base; got != 5 {
 		t.Fatalf("argument cost = %d, want 5 (Message.Tokens must account for ToolCall.Arguments)", got)
+	}
+}
+
+// TestMessageTokensCountsReasoning: replayed reasoning items ride on every
+// later request, so they must cost budget like any other bytes on the wire.
+func TestMessageTokensCountsReasoning(t *testing.T) {
+	item := json.RawMessage(`{"type":"reasoning","encrypted_content":"` + strings.Repeat("A", 40) + `"}`)
+	base := Message{Role: RoleAssistant, Content: "ok"}.Tokens()
+	with := Message{Role: RoleAssistant, Content: "ok", Reasoning: []json.RawMessage{item}}.Tokens()
+	if got, want := with-base, Tokens(string(item)); got != want {
+		t.Fatalf("reasoning cost = %d tokens, want %d (Message.Tokens must account for Reasoning)", got, want)
 	}
 }
 

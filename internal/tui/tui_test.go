@@ -542,8 +542,8 @@ func TestHistoryDownRestoresUnsentDraft(t *testing.T) {
 // resets the walker index to -1.
 func TestHistoryPushesOnSubmit(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: "+`{"type":"response.output_text.delta","delta":"ok"}`+"\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	})
 	m.histIdx = 2 // simulate "was navigating history"
 	mm, _ := m.submit("hello", "hello", promptEntry{display: "hello"})
@@ -705,15 +705,13 @@ func TestVerboseLogCapturesTurnRecords(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		round++
 		if round == 1 {
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"reasoning":"let me check the file"}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"echo HAMMER\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.reasoning_text.delta","delta":"let me check the file"}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"cmd\":\"echo HAMMER\"}"}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":5}}}`)
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"all done"}}]}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"all done"}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":2}}}`)
 	}
 
 	dir := t.TempDir()
@@ -784,10 +782,9 @@ func TestCtxPressureTripwire(t *testing.T) {
 	}
 }
 
-// TestSlashModelSwitchDropsStickyFallbackState: llm.Client's reasoningFallback
-// flag ("this server 400'd on tools+reasoning_effort, stop sending it") is
-// correct for one Client but wrong across a profile switch to a different
-// endpoint. rebuildClient swaps in a fresh Client; this asserts the pointer
+// TestSlashModelSwitchDropsStickyFallbackState: llm.Client's noReasoning flag
+// ("this server 400'd on the reasoning effort, stop sending it") is correct for
+// one Client but wrong across a profile switch to a different endpoint. rebuildClient swaps in a fresh Client; this asserts the pointer
 // changed so the sticky bit can't survive.
 func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
@@ -801,7 +798,7 @@ func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	out, _ := m.runSlash("/models remote")
 	final := out.(Model)
 	if final.cli == before {
-		t.Fatal("rebuildClient must replace the *llm.Client pointer to drop sticky reasoning_effort fallback state")
+		t.Fatal("rebuildClient must replace the *llm.Client pointer to drop sticky reasoning fallback state")
 	}
 	if final.cli.BaseURL != "http://remote:9000" || final.cli.Model != "cloud-model" || final.cli.Token != "sk-r" {
 		t.Fatalf("fresh client missing one of the new profile's fields: %+v", final.cli)
@@ -1018,8 +1015,8 @@ func TestSlashClearSurvivesBrokenConfig(t *testing.T) {
 func TestSubmitStreamsUpToDone(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"pong"}}]}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"pong"}`)
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	})
 	mm, cmd := m.submit("ping", "ping", promptEntry{display: "ping"})
 	out, _ := drain(mm, cmd)
@@ -1038,13 +1035,11 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 		turn++
 		switch turn {
 		case 1:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"echo HAMMER\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"cmd\":\"echo HAMMER\"}"}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":5}}}`)
 		default:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"echoed HAMMER for you"}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"echoed HAMMER for you"}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`)
 		}
 	})
 	mm, cmd := m.submit("run echo", "run echo", promptEntry{display: "run echo"})
@@ -1113,8 +1108,8 @@ func TestBuildToolsExposesExactlyFourTools(t *testing.T) {
 		t.Fatalf("buildTools returned %d tools, want %d: %+v", len(got), len(want), got)
 	}
 	for i, name := range want {
-		if got[i].Function.Name != name {
-			t.Fatalf("tool[%d] = %q, want %q (order matters)", i, got[i].Function.Name, name)
+		if got[i].Name != name {
+			t.Fatalf("tool[%d] = %q, want %q (order matters)", i, got[i].Name, name)
 		}
 	}
 }
@@ -1125,9 +1120,8 @@ func TestBuildToolsExposesExactlyFourTools(t *testing.T) {
 func TestTurnEndsWhenAssistantEmitsNoToolCalls(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"all done, nothing to run"}}]}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":4}}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"all done, nothing to run"}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":4}}}`)
 	})
 	mm, cmd := m.submit("just answer", "just answer", promptEntry{display: "just answer"})
 	out, _ := drain(mm, cmd)
@@ -1201,8 +1195,8 @@ func runTurn(t *testing.T, handler http.HandlerFunc, token, text string) Model {
 func budgetResponseHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Budget-Remaining", "0.73")
-	fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"ok"}}]}`)
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"ok"}`)
+	fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 }
 
 // TestHandleProbeSuccessUpdatesLiveCtxAndPrintsActivation: a successful probeMsg
@@ -1392,8 +1386,8 @@ func TestStatusBarShowsBudgetFromHeaders(t *testing.T) {
 func TestStatusBarOmitsBudgetWithoutHeaders(t *testing.T) {
 	view := runTurn(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: "+`{"type":"response.output_text.delta","delta":"ok"}`+"\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	}, "", "hi").View()
 	if strings.Contains(view, "pass") {
 		t.Fatalf("without headers the status bar must not show pass segment: %s", view)
@@ -1943,8 +1937,8 @@ func TestRepeatedFailureNudgeDifferentTargetResetsStreak(t *testing.T) {
 // early. submit's non-slash path zeroes failKey/failStreak.
 func TestSubmitResetsFailureStreak(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: "+`{"type":"response.output_text.delta","delta":"ok"}`+"\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	})
 	m.failKey = tools.BashName + "|make build"
 	m.failStreak = maxToolFailStreak - 1 // one away from firing
@@ -2235,15 +2229,13 @@ func TestVerifyNudgeEndToEndRePromptsThenFinishes(t *testing.T) {
 		round++
 		if round <= verifyNudgeMinRounds {
 			// A real tool call so toolRounds climbs to the gate.
-			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c%d\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"echo step\\\"}\"}}]}}]}\n\n", round)
-			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"completion_tokens\":5}}\n\n")
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c%d\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"echo step\\\"}\"}}\n\n", round)
+			fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":5}}}\n\n")
 			return
 		}
 		// A confident, toolless summary, what the galaxy runs shipped.
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Done - galaxy.html built with all features.\"}}]}\n\n")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":6}}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done - galaxy.html built with all features.\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":6}}}\n\n")
 	}
 
 	m := newTestModel(t, handler)
@@ -2464,8 +2456,8 @@ func TestPromptAutoGrowsWithContent(t *testing.T) {
 // textarea resets to empty and the height snaps back to 1 line.
 func TestPromptShrinksAfterSubmit(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: "+`{"type":"response.output_text.delta","delta":"ok"}`+"\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	})
 	m.ta.SetValue("line1\nline2\nline3\nline4")
 	m.recomputeLayout()
@@ -3166,17 +3158,15 @@ func TestMultiToolCallRoundExecutesAllBeforeNextChat(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		switch turn {
 		case 1:
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"cmd\":\"echo first\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"bash","arguments":"{\"cmd\":\"echo second\"}"}}]}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":5}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"cmd\":\"echo first\"}"}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","call_id":"c2","name":"bash","arguments":"{\"cmd\":\"echo second\"}"}}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":5}}}`)
 		default:
 			// Round 2 ends the turn: a plain content reply with NO tool call.
 			// Emitting a non-existent tool here would loop drain forever: runRaw
 			// returns "(unknown tool: ...)" and re-enters chat indefinitely.
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"both echoes finished"}}]}`)
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"both echoes finished"}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`)
 		}
 	})
 	mm, cmd := m.submit("two echoes", "two echoes", promptEntry{display: "two echoes"})
@@ -3297,13 +3287,11 @@ func TestEmptyReplyNudgeRePromptsThenRecovers(t *testing.T) {
 		round++
 		if round == 1 {
 			// Empty assistant message: stop with no content delta, no tool calls.
-			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`)
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"fixed and verified"}}]}`)
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"fixed and verified"}`)
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":3}}}`)
 	}
 
 	m := newTestModel(t, handler)
@@ -3342,8 +3330,7 @@ func TestEmptyReplyNudgeFiresOnceThenSurfaces(t *testing.T) {
 	handler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		round++
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":1}}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.completed","response":{"usage":{"output_tokens":1}}}`)
 	}
 
 	m := newTestModel(t, handler)
@@ -3428,8 +3415,8 @@ func TestSubmitRecoversFromTransient404EndToEnd(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"recovered"}}]}`)
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"recovered"}`)
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
 	})
 	m.cli.RetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 
@@ -3536,16 +3523,15 @@ func TestMidStreamDropReplaysWithoutDuplicating(t *testing.T) {
 		round++
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"half an ans\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"half an ans\"}\n\n")
 		w.(http.Flusher).Flush()
 		if round == 1 {
 			conn, _, _ := w.(http.Hijacker).Hijack()
 			conn.Close()
 			return
 		}
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"wer.\"}}]}\n\n")
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":4}}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"wer.\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":4}}}\n\n")
 	}
 	m := newTestModel(t, handler)
 	final := drainFinal(t, m, "answer me")

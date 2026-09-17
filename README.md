@@ -1,7 +1,7 @@
 # codehamr
 
 A minimal coding agent for the terminal. Built for local LLMs, also
-runs on OpenAI-compatible endpoints.
+runs on any endpoint that speaks the OpenAI Responses API.
 
 ![codehamr demo](codehamr.gif)
 
@@ -51,8 +51,12 @@ On first run codehamr seeds `.codehamr/config.yaml` with a `local`
 in the binary, not on disk. Project specific rules go straight into the
 chat: tell the agent what matters, the conversation carries it.
 
-Any OpenAI-compatible endpoint works too. The example below adds an
-`openai` profile:
+codehamr speaks the OpenAI Responses API (`POST /v1/responses`), the one
+wire format OpenAI's current models accept function tools on. Every
+current server ships it: OpenAI itself, Ollama 0.13.3 or newer, vLLM,
+llama.cpp, LM Studio. An older server that only has `/v1/chat/completions`
+answers 404 and codehamr tells you so; upgrade the server. The example
+below adds an `openai` profile:
 
 ```yaml
 # codehamr configuration

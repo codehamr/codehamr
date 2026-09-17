@@ -771,16 +771,14 @@ func (m *Model) buildTools() []llm.Tool {
 }
 
 // schemaToTool unwraps a tool schema (the map[string]any shape shared by bash
-// and the file tools) into the typed llm.Tool the chat payload expects.
+// and the file tools) into the flat llm.Tool the Responses payload expects.
 func schemaToTool(s map[string]any) llm.Tool {
 	fn := s["function"].(map[string]any)
 	return llm.Tool{
-		Type: s["type"].(string),
-		Function: llm.FunctionDef{
-			Name:        fn["name"].(string),
-			Description: fn["description"].(string),
-			Parameters:  fn["parameters"].(map[string]any),
-		},
+		Type:        s["type"].(string),
+		Name:        fn["name"].(string),
+		Description: fn["description"].(string),
+		Parameters:  fn["parameters"].(map[string]any),
 	}
 }
 
@@ -871,8 +869,8 @@ func (m *Model) applyToolCall(e llm.Event) {
 // applyDone closes one LLM round: harvest the live context window, accumulate
 // turn/session tokens, append the assistant message, flush streaming. A turn
 // with tool calls fires one EventDone per round; counters accumulate so the
-// banner reflects the whole turn. Tokens==0 means the backend skipped
-// include_usage; the char/4 estimate carries the counter on those servers.
+// banner reflects the whole turn. Tokens==0 means the backend reported no
+// usage on response.completed; the char/4 estimate carries the counter then.
 func (m *Model) applyDone(e llm.Event) {
 	m.budget = e.Budget
 	if e.ContextWindow > 0 {
@@ -1169,8 +1167,9 @@ func newestAssistantUnverified(history []chmctx.Message) bool {
 // toolCallLeakWarning returns a user-facing diagnostic when the newest assistant
 // message carries a tool-call opener (`<tool_call>`) in its text instead of
 // structured tool_calls, the dominant local-hosting failure: a
-// misconfigured/missing server parser leaks the call as content with
-// finish_reason "stop", so the turn ends silently with the tool intent stranded.
+// misconfigured/missing server parser leaks the call as output text and the
+// response completes normally, so the turn ends silently with the tool intent
+// stranded.
 // The bare `<tool_call>` opener covers both shapes the target servers emit: the
 // XML body (`<function=…`) and the general JSON body
 // (`{"name":…`): gating on the literal tag alone catches both while staying
