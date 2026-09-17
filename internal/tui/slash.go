@@ -184,7 +184,7 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 
 // rebuildClient swaps in a fresh llm.Client for the now-active profile.
 // Replacing the pointer (not mutating fields) drops the prior Client's sticky
-// state (noReasoningEffort, keep-alive pool tied to the old URL): new
+// state (reasoningFallback, keep-alive pool tied to the old URL): new
 // endpoint, fresh slate.
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()

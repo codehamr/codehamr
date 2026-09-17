@@ -784,7 +784,7 @@ func TestCtxPressureTripwire(t *testing.T) {
 	}
 }
 
-// TestSlashModelSwitchDropsStickyFallbackState: llm.Client's noReasoningEffort
+// TestSlashModelSwitchDropsStickyFallbackState: llm.Client's reasoningFallback
 // flag ("this server 400'd on tools+reasoning_effort, stop sending it") is
 // correct for one Client but wrong across a profile switch to a different
 // endpoint. rebuildClient swaps in a fresh Client; this asserts the pointer

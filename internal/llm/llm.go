@@ -252,17 +252,19 @@ type Client struct {
 	// only so tests can shorten it; New sets the default and nothing else
 	// writes it.
 	RetryBackoff []time.Duration
-	// noReasoningEffort goes true once the server 400s on reasoning for this
+	// reasoningFallback is set once the server 400s on reasoning for this
 	// model (newer OpenAI models reject tools + reasoning_effort here, pushing
 	// that combo onto /v1/responses; Ollama rejects it on non-thinking models).
-	// Sticky for the Client's lifetime so later turns skip
-	// to the supported shape; a `/models` switch builds a fresh Client and
-	// resets it, correctly, since the new endpoint may have different rules.
+	// nil until then; afterwards the reasoning_effort value every request
+	// sends instead: "" omits the field, "none" sends it explicitly. Sticky for
+	// the Client's lifetime so later turns skip to the supported shape; a
+	// `/models` switch builds a fresh Client and resets it, correctly, since
+	// the new endpoint may have different rules.
 	//
-	// atomic.Bool: Probe and Chat race on the same Client (startup probe still
-	// in flight when the first turn fires) and both read it via postChat; Chat
-	// may also write it. A plain bool would be a data race.
-	noReasoningEffort atomic.Bool
+	// atomic: Probe and Chat race on the same Client (startup probe still in
+	// flight when the first turn fires) and both read it via postChat; Chat
+	// may also write it. A plain field would be a data race.
+	reasoningFallback atomic.Pointer[string]
 }
 
 // New builds a Client governed by the caller's context, not http.Client.Timeout.
@@ -318,8 +320,9 @@ func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 // critical path of every round, and `high` bought deliberation the agent loop
 // already gets from seeing each tool result. If the server
 // rejects the tools + reasoning_effort combo (newer OpenAI models do), postChat
-// drops reasoning_effort for this Client's lifetime so the model still works,
-// with tools but no reasoning. Staying on chat-completions is the product line;
+// drops reasoning_effort (or pins it to `none` where the server demands that)
+// for this Client's lifetime so the model still works, with tools but no
+// reasoning. Staying on chat-completions is the product line;
 // we do not branch to /v1/responses to keep reasoning.
 func (c *Client) Chat(parent context.Context, messages []chmctx.Message, tools []Tool) <-chan Event {
 	out := make(chan Event, 32)
@@ -447,45 +450,54 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 	return resp, nil
 }
 
-// postChat dispatches via doPost; on a 400 rejecting reasoning it drops
-// reasoning_effort for this Client's lifetime and retries once.
-// Probe never sets ReasoningEffort, so its 400 can't trip the flag.
+// postChat dispatches via doPost; on a 400 rejecting reasoning it swaps
+// reasoning_effort for the server's accepted shape for this Client's lifetime
+// and retries once. Probe never sets ReasoningEffort, so its 400 can't trip it.
 func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, error) {
-	if c.noReasoningEffort.Load() {
-		body.ReasoningEffort = ""
+	if fb := c.reasoningFallback.Load(); fb != nil {
+		body.ReasoningEffort = *fb
 	}
 	resp, budget, errBody, err := c.doPost(parent, body)
-	if err != nil && body.ReasoningEffort != "" && rejectsReasoning(errBody) {
-		c.noReasoningEffort.Store(true)
-		body.ReasoningEffort = ""
-		resp, budget, _, err = c.doPost(parent, body)
+	if err != nil && body.ReasoningEffort != "" {
+		if fb, ok := reasoningFallback(errBody); ok {
+			c.reasoningFallback.Store(&fb)
+			body.ReasoningEffort = fb
+			resp, budget, _, err = c.doPost(parent, body)
+		}
 	}
 	return resp, budget, err
 }
 
-// rejectsReasoning reports whether an error body is a server refusing our
-// reasoning_effort, as opposed to any other 400. Three wild flavours, all
-// caught by substring match: newer OpenAI models ("reasoning_effort … not
-// supported" alongside tools), Ollama non-thinking models ("<model> does not
-// support thinking"), and models whose scale simply omits our value ("Unexpected
-// reasoning effort high" — Qwen3.8 defines xhigh/medium/low, with no `high`).
-// Each signal is the provider's own phrase, never a lone generic word, so an
-// unrelated 400 that merely mentions "thinking" can't latch reasoning off for
-// the Client's whole life. Dropping the field is the right remedy for all
-// three, but note what it costs: the server then applies its own default (on
-// the Qwen3.8 scale that is xhigh, i.e. MORE reasoning than we asked for, not
-// less). Dropping the field is a compatibility fix, never a way to think less.
-func rejectsReasoning(errBody []byte) bool {
+// reasoningFallback reports whether an error body is a server refusing our
+// reasoning_effort, as opposed to any other 400, and the value to resend with.
+// Three wild flavours, all caught by substring match: newer OpenAI models
+// ("reasoning_effort … not supported" alongside tools), Ollama non-thinking
+// models ("<model> does not support thinking"), and models whose scale simply
+// omits our value ("Unexpected reasoning effort high" — Qwen3.8 defines
+// xhigh/medium/low, with no `high`). Each signal is the provider's own phrase,
+// never a lone generic word, so an unrelated 400 that merely mentions
+// "thinking" can't latch reasoning off for the Client's whole life.
+//
+// The usual remedy is omitting the field (""), but note what it costs: the
+// server then applies its own default (on the Qwen3.8 scale that is xhigh,
+// i.e. MORE reasoning than we asked for, not less). OpenAI's newest models are
+// the exception: their default is a real effort level, so omitting the field
+// 400s identically and the message itself demands `'none'`; only then do we
+// send it explicitly. A compatibility fix either way, never a way to think less.
+func reasoningFallback(errBody []byte) (string, bool) {
 	switch {
 	case bytes.Contains(errBody, []byte("not support")) &&
 		bytes.Contains(errBody, []byte("reasoning_effort")):
-		return true
+		if bytes.Contains(errBody, []byte("'none'")) {
+			return "none", true
+		}
+		return "", true
 	case bytes.Contains(errBody, []byte("does not support thinking")):
-		return true
+		return "", true
 	case bytes.Contains(errBody, []byte("Unexpected reasoning effort")):
-		return true
+		return "", true
 	}
-	return false
+	return "", false
 }
 
 // doPost performs one round-trip, mapping status into the typed cloud errors

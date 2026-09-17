@@ -698,8 +698,52 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 	}
 }
 
-// TestProbeChatNoReasoningEffortIsRaceFree pins the atomic.Bool guard on
-// Client.noReasoningEffort. The startup probe and the first chat can run on the
+// TestChatFallsBackToNoneWhenServerDemandsIt: from GPT-5.4 on, OpenAI's
+// default effort is a real level, so a retry that merely omits the field 400s
+// identically ("set reasoning_effort to 'none'"). The fallback must send the
+// value the message names, and keep sending it on later turns.
+func TestChatFallsBackToNoneWhenServerDemandsIt(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if !strings.Contains(string(b), `"reasoning_effort":"none"`) {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","param":"reasoning_effort"}}`)
+			return
+		}
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "gpt-6-astra", "")
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
+	}
+	if !strings.Contains(bodies[1], `"reasoning_effort":"none"`) {
+		t.Fatalf("retry must send reasoning_effort none, not omit it: %s", bodies[1])
+	}
+
+	bodies = nil
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			t.Fatalf("second turn must not error: %v", e.Err)
+		}
+	}
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"reasoning_effort":"none"`) {
+		t.Fatalf("second turn should make 1 request with none pinned, got %v", bodies)
+	}
+}
+
+// TestProbeChatNoReasoningEffortIsRaceFree pins the atomic guard on
+// Client.reasoningFallback. The startup probe and the first chat can run on the
 // same *Client concurrently (probe from Init, chat when the user submits early):
 // both read the flag via postChat, and a 400 fallback writes it. A plain bool
 // would be a data race; this must run clean under -race.
@@ -870,7 +914,7 @@ func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
 	if len(bodies) != 1 {
 		t.Fatalf("unrelated 400 must NOT trigger a fallback retry; got %d requests", len(bodies))
 	}
-	if c.noReasoningEffort.Load() {
+	if c.reasoningFallback.Load() != nil {
 		t.Fatal("reasoning must not latch off on a 400 unrelated to reasoning")
 	}
 }
