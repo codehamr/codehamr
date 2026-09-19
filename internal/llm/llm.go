@@ -520,7 +520,9 @@ func (c *Client) doPost(parent context.Context, body request) (*http.Response, c
 	default:
 		b, _ := io.ReadAll(resp.Body)
 		msg := errorMessageFromBody(b)
-		if resp.StatusCode == 404 {
+		if resp.StatusCode == 404 && strings.Contains(msg, "litellm.NotFoundError") {
+			msg += " · check LiteLLM's upstream URL and model; if that upstream only supports /chat/completions, set use_chat_completions_api: true under this model's litellm_params in the proxy config"
+		} else if resp.StatusCode == 404 {
 			// A route miss is the one misconfiguration the body never explains:
 			// a server that still only speaks chat completions (Ollama before
 			// 0.13.3, an older proxy) says nothing more than "not found". Name

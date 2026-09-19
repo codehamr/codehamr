@@ -51,12 +51,11 @@ On first run codehamr seeds `.codehamr/config.yaml` with a `local`
 in the binary, not on disk. Project specific rules go straight into the
 chat: tell the agent what matters, the conversation carries it.
 
-codehamr speaks the OpenAI Responses API (`POST /v1/responses`), the one
-wire format OpenAI's current models accept function tools on. Every
-current server ships it: OpenAI itself, Ollama 0.13.3 or newer, vLLM,
-llama.cpp, LM Studio. An older server that only has `/v1/chat/completions`
-answers 404 and codehamr tells you so; upgrade the server. The example
-below adds an `openai` profile:
+codehamr speaks the OpenAI Responses API (`POST /v1/responses`). Your
+server and model route must support that endpoint. A server that only
+exposes `/v1/chat/completions` can return 404 even when its health check
+passes and `/v1/models` lists the model. Upgrade the server or use
+LiteLLM's bridge described below. The example adds an `openai` profile:
 
 ```yaml
 # codehamr configuration
@@ -83,6 +82,26 @@ models:
 ```
 
 `/models` lists profiles, `/models <name>` switches.
+
+If LiteLLM forwards `/v1/responses` to an upstream that only supports chat
+completions, enable its bridge in the **LiteLLM proxy configuration**:
+
+```yaml
+model_list:
+  - model_name: my-model
+    litellm_params:
+      model: openai/my-model
+      api_base: http://upstream:8000/v1
+      api_key: os.environ/UPSTREAM_API_KEY
+      use_chat_completions_api: true
+```
+
+Restart LiteLLM after changing its config file. LiteLLM translates to the
+upstream's chat API and streams Responses events back, including tool
+calls. codehamr's profile URL and key stay the same. A working health
+check or model listing alone does not verify this route; test an actual
+`POST /v1/responses` request. See the
+[LiteLLM bridge documentation](https://docs.litellm.ai/docs/response_api#opt-in-bridge-for-openai-models-with-custom-api_base).
 
 ## Hardware
 

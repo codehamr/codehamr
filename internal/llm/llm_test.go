@@ -657,6 +657,26 @@ func TestChat404NamesTheRequirement(t *testing.T) {
 	}
 }
 
+func TestLiteLLM404NamesTheBridge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"message":"litellm.NotFoundError: OpenAIException - 404: Not Found"}}`)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "local-model", "").Probe(context.Background())
+	if err == nil {
+		t.Fatal("404 must fail the probe")
+	}
+	for _, want := range []string{"404", "litellm.NotFoundError", "upstream URL and model", "use_chat_completions_api: true"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "Ollama 0.13.3") {
+		t.Errorf("proxy error must not prescribe a local server upgrade: %v", err)
+	}
+}
+
 // TestChatStructuredErrorPrefersProviderHint: the hamrpass proxy wraps upstream
 // errors as `{"error":{"message":...,"provider_hint":...}}`; provider_hint wins.
 func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
